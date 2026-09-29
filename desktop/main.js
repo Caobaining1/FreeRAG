@@ -64,7 +64,22 @@ function resolveRuntime() {
     models: installed ? path.join(resources, 'models') : path.join(dev, 'models'),
     sidecar: installed ? path.join(resources, 'sidecar') : path.join(dev, 'sidecar'),
     qdrant: installed ? path.join(resources, 'bin', 'qdrant') : path.join(dev, '.toolchain', 'qdrant', 'qdrant'),
+    // Installed, this is the interpreter vendored by fetch-python-runtime.sh,
+    // which carries pymupdf and onnxruntime with it. In a checkout it is the
+    // project venv. Neither is optional: `python3` on PATH on a clean machine
+    // has none of the sidecar's dependencies.
+    python: installed
+      ? bundledPython(path.join(resources, 'python'))
+      : path.join(dev, '.venv314', 'bin', 'python'),
   };
+}
+
+/** Path to the interpreter inside a vendored python-build-standalone tree. */
+function bundledPython(root) {
+  // POSIX layouts put it in bin/, Windows puts python.exe at the top level.
+  return process.platform === 'win32'
+    ? path.join(root, 'python.exe')
+    : path.join(root, 'bin', 'python3');
 }
 
 /** Absolute path of the Go kernel binary for this platform. */
@@ -103,11 +118,15 @@ function kernelEnv(runtime, qdrantReady) {
   // failure on every launch, and a warning that always fires is one nobody
   // reads.
   if (qdrantReady) env.FREERAG_QDRANT_URL = QDRANT_URL;
-  // A checkout has a venv; an install ships an interpreter or falls back to the
-  // one on PATH. Either way the sidecar is told explicitly, because "python3" on
-  // this machine may be the one without pymupdf.
-  if (!runtime.installed) {
-    env.FREERAG_PYTHON = path.join(path.resolve(__dirname, '..'), '.venv314', 'bin', 'python');
+  // Told explicitly, never left to PATH discovery. "python3" on a machine that
+  // never ran this project is the system interpreter, which has none of the
+  // sidecar's dependencies — and that failure shows up as a parse error on the
+  // first document rather than as a startup error, so it reads as "the app is
+  // broken" instead of "a dependency is missing". Only set when the file is
+  // actually there: a wrong-but-present path would be worse than none, since
+  // the kernel reports the absence but cannot check a promise.
+  if (fs.existsSync(runtime.python)) {
+    env.FREERAG_PYTHON = runtime.python;
   }
   return env;
 }

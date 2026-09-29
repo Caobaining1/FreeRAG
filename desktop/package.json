@@ -37,6 +37,10 @@
         "to": "bin/qdrant"
       },
       {
+        "from": "vendor/python",
+        "to": "python"
+      },
+      {
         "from": "../sidecar",
         "to": "sidecar",
         "filter": [

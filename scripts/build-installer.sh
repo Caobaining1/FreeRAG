@@ -3,15 +3,16 @@
 # Packages the desktop app (docs/plan.md §9 Phase 3 / Phase 6).
 #
 # What goes in: the Electron shell, the Go kernel, the parse sidecar's Python
-# sources, the ONNX models (layout / TSR / OCR / Laya) and Qdrant.
+# sources, a vendored CPython with the sidecar's dependencies, the ONNX models
+# (layout / TSR / OCR) and Qdrant.
 #
 # What does NOT, on purpose:
 #
 #   * the generating LLM. Qwen3-4B is ~2.4 GB of weights and arrives through
 #     Ollama; the app reports it as missing (`status`) rather than growing the
-#     download by gigabytes. Same for Laya's GGUF.
-#   * a Python runtime. See the warning printed at the end — this is the one
-#     thing still standing between "the app runs" and "install and it works".
+#     download by gigabytes. Same for Laya's ONNX weights — 1.6 GB on their own,
+#     which would more than triple the download for a component the app degrades
+#     without (the sufficiency checker falls back to term overlap).
 #
 # Usage:
 #   scripts/build-installer.sh [--dir]
@@ -62,10 +63,18 @@ else
   fi
 fi
 
-say "3. check the sidecar and models are present"
+say "3. vendor the Python runtime"
+# Without this the app answers questions about already-indexed documents but
+# cannot parse a new one, because the sidecar's dependencies are not on a clean
+# machine. Kept as a separate script: it downloads ~27 MB and builds a ~258 MB
+# tree, so it should be runnable on its own while iterating on the sidecar.
+"$ROOT/scripts/fetch-python-runtime.sh"
+
+say "4. check the sidecar and models are present"
 MISSING=0
 for f in \
   "$ROOT/sidecar/parse_server.py" \
+  "$VENDOR/python/bin/python3" \
   "$ROOT/models/deepdoc/layout.onnx" \
   "$ROOT/models/deepdoc/tsr.onnx" \
   "$ROOT/models/laya-onnx/laya.onnx"
@@ -82,7 +91,7 @@ if [[ "$MISSING" == "1" ]]; then
   exit 1
 fi
 
-say "4. electron-builder ($TARGET)"
+say "5. electron-builder ($TARGET)"
 # electron-builder fetches its own Electron distribution and helper binaries
 # from GitHub. On a network where that stalls, the build hangs for ten minutes
 # and dies with a bare "Timeout awaiting 'request'" — which says nothing about
@@ -97,18 +106,18 @@ export CSC_IDENTITY_AUTO_DISCOVERY="${CSC_IDENTITY_AUTO_DISCOVERY:-false}"
 
 say "done"
 cat <<'NOTE'
-The build is under dist/. Two things to know before handing it to anyone:
+The build is under dist/. Three things to know before handing it to anyone:
 
-  1. NO PYTHON RUNTIME IS BUNDLED. The parse sidecar needs Python 3 with
-     pymupdf, onnxruntime and numpy. On this machine it finds .venv314 only in
-     a *checkout*; installed, the kernel looks for `python3` on PATH and the app
-     reports the sidecar as unconfigured when it is absent.
-     Fixing this properly means either freezing the sidecar with PyInstaller or
-     shipping python-build-standalone. Until then the app is not "install and it
-     just works" on a clean machine — it is "install and it works if Python is
-     already set up".
-     The UI says so rather than failing silently: `status` reports
-     `sidecar.configured`.
+  1. A PYTHON RUNTIME IS BUNDLED, and it is why the build is ~250 MB larger
+     than the Electron shell alone: ~258 MB, being CPython 3.14 plus pymupdf,
+     onnxruntime, numpy and tokenizers. Without it the app answers questions
+     about documents that are already indexed but cannot parse a new one —
+     which is the first thing a user tries.
+     It is built by scripts/fetch-python-runtime.sh and lives in
+     desktop/vendor/python (gitignored: it is an artifact, not source). Re-run
+     that script with --force whenever requirements.txt changes.
+     The app points FREERAG_PYTHON at it rather than discovering `python3` on
+     PATH, which on a clean machine is an interpreter without those packages.
 
   2. NO LLM WEIGHTS, AND NO LAYA. Ollama plus a `freerag-qwen3` model are
      required, and Laya's ONNX weights are not bundled either — `laya.onnx.data`

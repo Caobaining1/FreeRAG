@@ -16,9 +16,13 @@
 | # | 事项 | 为什么现在必须做 | 位置 |
 | :--- | :--- | :--- | :--- |
 | 1 | **存储层：关键词索引与增量落盘** | **密集那一半已由 Qdrant 接手**（实测 recall@10 = 1.000，选型见 §4）。剩下的是关键词侧：BM25 词索引与 chunk 文本都在内存、`Save` 仍是 O(全库) 重写。实测 200k chunks：Save **10.3s/次**、内存 1343MB。**是否真要引入 SQLite FTS5，取决于目标语料规模——取舍分析见 §0.3.2** | `internal/store/`（BM25 / grep / RRF） |
-| 2 | **打包 Python 运行时** | sidecar 需要带 `pymupdf` / `onnxruntime` / `numpy` 的 Python 3。源码树能找到 `.venv314`，**安装态只在 PATH 上找 `python3`** —— 实测打包产物 **498 MB 可正常启动、能回答索引里已有的文档，但解析不了任何新文档**，与 §1「安装即用」直接冲突 | `scripts/build-installer.sh`；二选一：PyInstaller 冻结 sidecar，或随包带 python-build-standalone |
-
-> **P0 有两项。** 原来的 P0-1（本地嵌入）已由决策定为「始终走 SiliconFlow 托管 API」，
+> **P0 只剩一项。** 原 **P0-2（打包 Python 运行时）已于 2026-09-29 完成**：
+> 随包带 python-build-standalone 的 CPython 3.14 加 sidecar 的四个依赖
+> （`scripts/fetch-python-runtime.sh`，裁到约 258 MB），`desktop/main.js` 改成**显式下发
+> `FREERAG_PYTHON`** 而不再依赖 PATH 探测。验收用 `env -i` 的干净环境跑打包件解析真实 38 页 PDF：
+> **成功，38 页 / 287 块 / 203 chunks，版面引擎 `pp-doclayout`**。打包体积 498 MB → **772 MB**。
+>
+> 原来的 P0-1（本地嵌入）已由决策定为「始终走 SiliconFlow 托管 API」，
 > 理由、代价与缓解见 **§0.3.1**；它从待办中移除，但**它带来的风险没有被解决，只是被接受了**。
 
 **P1 — 功能缺口**
@@ -66,7 +70,7 @@
 | **进度通知** | ✅ `ipc.Server.Notify`（无 id 的 JSON-RPC 通知）；`index` / `ask` 逐阶段上报：hash / skipped / parse / parsed / stored / persisted / agent | `internal/ipc/jsonrpc.go` |
 | **文档管理 RPC** | ✅ `documents`（含 md5/页数/索引时间/实际 chunk 数）、`forget`、`status`（各子系统健康 + 哪些没探测） | `cmd/freerag/main.go` |
 | **桌面端界面（产品形态）** | ✅ 文档列表 + 拖放/选择文件 + 提问 + 引用 `[n]` 跳转 + 实时进度；草稿转义后进 DOM | `desktop/renderer/` |
-| **安装器（electron-builder）** | ⚠️ 可打包，实测 **498 MB 可启动**、路径全部落到 userData、Qdrant 随包自启；**缺 Python 运行时**（P0-2） | `scripts/build-installer.sh` |
+| **安装器（electron-builder）** | ✅ **772 MB**，含随包 Python 运行时，安装即用；路径全部落到 userData、Qdrant 随包自启；干净环境实测可解析新文档 | `scripts/build-installer.sh`、`scripts/fetch-python-runtime.sh` |
 | Agentic 循环（medium） | ✅ 3 轮 SCA + 重写；含提取式兜底 | `internal/agent/loop.go` |
 | **SCA 用 Laya（§6.6）** | ✅ 类型化决策，只喂 draft；约 104ms/次 | `sidecar/laya.py`、`internal/agent/checker.go` |
 | 生成 LLM（Qwen3-4B via Ollama） | ✅ 含 `num_ctx` 与 prompt 预算护栏 | `internal/agent/ollama.go` |

@@ -32,7 +32,7 @@
 | **Electron 桌面端（产品形态）** | ✅ 可用 | `desktop/`：文档列表 + 拖放/选择文件 + 提问 + 引用跳转 + 实时进度 |
 | **进度通知（JSON-RPC notification）** | ✅ 已接入 | `internal/ipc` 的 `Server.Notify`；`index` / `ask` 逐阶段上报 |
 | **文档管理 RPC** | ✅ 已接入 | `documents` / `forget` / `status` |
-| **安装器（electron-builder）** | ⚠️ 可打包，**缺 Python 运行时** | `scripts/build-installer.sh`；产出约 500 MB，见「打包安装器」 |
+| **安装器（electron-builder）** | ✅ 含随包 Python 运行时，安装即用 | `scripts/build-installer.sh`、`scripts/fetch-python-runtime.sh`；产出约 772 MB，见「打包安装器」 |
 | **模型下载（本地化）** | ✅ 已下载 | 4.39 GB，见「本地模型」 |
 | **生成 LLM 接入（Qwen3-4B）** | ✅ 已接入 | 经 Ollama / llama.cpp；不可达时降级为抽取式 draft |
 | **TSR 表格结构（`tsr.onnx`）** | ✅ 已接入 | `sidecar/tsr_onnx.py` + `sidecar/table_grid.py`；真实论文表格转 Markdown **1/10 → 9/10** |
@@ -516,8 +516,46 @@ scripts/build-installer.sh          # 出 dmg / nsis / AppImage
 | `FREERAG_CACHE_DIR` | `<userData>/cache/parse` | 同上；而且缓存写失败是**静默的**（`cache.py` 吞掉 `OSError`），界面看起来正常却每次全量重解析 |
 | `FREERAG_LAYOUT_MODEL` / `FREERAG_TSR_MODEL` | `<resources>/models/deepdoc/*.onnx` | 模型随包分发 |
 | `FREERAG_PARSE_SIDECAR` | `<resources>/sidecar/parse_server.py` | sidecar 随包分发 |
+| `FREERAG_PYTHON` | `<resources>/python/bin/python3` | **绝不留待 PATH 探测**，见下 |
 
-**体积约 500 MB**：Electron ~250 MB + `qdrant` 80 MB + `deepdoc` 模型 108 MB + 内核 10 MB。
+**体积约 770 MB**：Electron ~250 MB + **Python 运行时 273 MB** + `qdrant` 80 MB +
+`deepdoc` 模型 108 MB + 内核 10 MB + 应用外壳。
+
+## 随包的 Python 运行时
+
+```bash
+scripts/fetch-python-runtime.sh           # 下载 + 装依赖 + 裁剪（约 4 分钟）
+scripts/fetch-python-runtime.sh --force   # requirements.txt 变了之后重建
+```
+
+构建进 `desktop/vendor/python`（约 **258 MB**，gitignore 掉 —— 它是产物，不是源码）：一份
+**python-build-standalone 的 CPython 3.14** 加上 `pymupdf` / `onnxruntime` / `numpy` / `tokenizers`。
+
+**为什么必须随包带**：干净的机器上没有任何一个依赖。缺了它，应用能启动、能回答索引里已有的文档，
+**但解析不了任何新文档** —— 而那正是任何人打开它的第一件事。它的失败形态也最容易被误读：
+不是启动报错，而是**第一次解析文档时**才失败，看起来像"应用坏了"而不是"缺依赖"。
+
+**为什么用 python-build-standalone 而不是系统 Python**：它被设计成可重定位（`sys.prefix` 跟着可执行文件走，
+脚本第 5 步会验证这一点），不依赖 Xcode 命令行工具、Homebrew 或 pyenv，可以整个塞进 app bundle，
+不碰用户自己装的那些东西。
+
+裁剪掉的东西（每一项都对照 sidecar 实际会执行的 import 核过）：
+
+| 裁掉 | 省 | 为什么安全 |
+| :--- | ---: | :--- |
+| `huggingface_hub` + `hf_xet` | 15 MB | 只有 `from_pretrained` 才会用到；`sidecar/laya.py:192` 用的是 `Tokenizer.from_file` 读本地 `tokenizer.json` |
+| `pip` / `setuptools` / `wheel` | 11 MB | 运行时不需要装任何东西（用 `pip uninstall` 卸，不是 `rm`） |
+| `include` / `ensurepip` / `idlelib` / `tkinter` / `pydoc_data` 等 | 7 MB | 解释器家具，本项目用不到 |
+
+> **`__pycache__` 是刻意保留的（约 44 MB），不是疏漏。** 安装后的 app bundle **只读**，
+> Python 再也无法写回缓存：实测带缓存导入依赖 **0.19s**，不带则**每次启动都要 1.16s**。
+> 用 44 MB 换回每次启动的一秒，对天天要开的应用是划算的。缓存也不会过期失效 ——
+> pyc 记录源文件的 size 与 mtime，之后被改过的源码照样会重新编译。
+
+> **下载会走镜像。** GitHub 的 release CDN 在部分网络下不可达，而且失败形态是**静默卡住**而非报错。
+> 脚本按 直连 → `gh-proxy.com` → `ghproxy.net` 依次重试，每次都有超时上界；
+> 可用 `GITHUB_MIRROR=<prefix>` 指定。实测本机直连**从未成功**，走镜像约 170 秒。
+> 下载好的 tarball 缓存在 `desktop/vendor/python-runtime.tar.gz`，重建时直接复用。
 
 **三样东西刻意不打包**（由 `scripts/download-models.sh` 另外取）：
 
@@ -525,13 +563,6 @@ scripts/build-installer.sh          # 出 dmg / nsis / AppImage
 | :--- | :--- |
 | Qwen3-4B（~2.4 GB） | 由 Ollama 管理 |
 | Laya ONNX（`laya.onnx.data` **1.6 GB**） | 会使下载量翻两倍多，而缺了它只退化为词重叠启发式 |
-| **Python 运行时** | ← **目前最大的缺口，见下** |
-
-> ⚠️ **没有打包 Python 运行时，「安装即用」还差这一步。**
-> sidecar 需要带 `pymupdf` / `onnxruntime` / `numpy` 的 Python 3。源码树里能找到 `.venv314`；
-> **安装态只在 PATH 上找 `python3`**，干净的机器上没有 —— 应用能启动、能回答索引里已有的文档，
-> **但解析不了任何新文档**。修法二选一：PyInstaller 冻结 sidecar，或随包带 python-build-standalone。
-> 在那之前界面会如实显示 `sidecar.configured`，不会假装正常。
 
 > ⚠️ **macOS 未签名**，首次启动会被 Gatekeeper 拦。右键 → 打开，或
 > `xattr -dr com.apple.quarantine /Applications/freerag.app`。
