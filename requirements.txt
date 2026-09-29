@@ -1,0 +1,21 @@
+# Python dependencies for the parse sidecar and the Laya decision model.
+#
+#   .venv314/bin/python -m pip install -r requirements.txt
+#
+# Versions are minimums, not pins: every one of these ships manylinux/macOS/
+# Windows wheels, and the desktop installer should take the newest compatible
+# build rather than fight a resolver.
+
+# PDF text layer, page rasterisation, table extraction (docs/plan.md §5.1).
+pymupdf>=1.24
+
+# PP-DocLayout layout detection and Laya typed decisions both run through this.
+onnxruntime>=1.17
+
+# Array handling for the letterbox preprocessing and the decision scores.
+numpy>=1.24
+
+# Laya's checkpoint ships a HuggingFace fast tokenizer (tokenizer.json).
+# `tokenizers` is the runtime for it; `transformers` is NOT needed — the
+# sequence template is built in sidecar/laya.py, not by a pipeline.
+tokenizers>=0.15

@@ -1,0 +1,51 @@
+# Build artifacts
+/bin/
+/dist/
+/out/
+
+# Local runtime data (SQLite + sqlite-vec, parsed cache)
+/data/
+
+# Downloaded models (see scripts/download-models.sh)
+/models/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Toolchains installed locally for this repo
+/.toolchain/
+
+# Node / Electron
+node_modules/
+npm-debug.log*
+
+# Python sidecar
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Generated reports (layout visualisation, etc.)
+/artifacts/
+
+# Local secrets (API keys). Never commit.
+.env
+.env.*
+!.env.example
+
+# Parse cache (regenerable)
+/cache/
+
+# Qdrant writes this marker into its working directory when started locally
+.qdrant-initialized
+
+# Vendored runtime for packaging: build-installer.sh fetches the Qdrant binary
+# here so electron-builder has a stable path to bundle. Regenerable, and 73 MB.
+/desktop/vendor/

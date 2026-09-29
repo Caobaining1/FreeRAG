@@ -1,0 +1,69 @@
+{
+  "name": "freerag-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "freerag desktop shell — Electron UI over the Go kernel's JSON-RPC stdio interface",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "ai.freerag.desktop",
+    "productName": "freerag",
+    "directories": {
+      "output": "../dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../bin/freerag",
+        "to": "bin/freerag"
+      },
+      {
+        "from": "vendor/qdrant",
+        "to": "bin/qdrant"
+      },
+      {
+        "from": "../sidecar",
+        "to": "sidecar",
+        "filter": [
+          "**/*.py",
+          "!**/tests/**"
+        ]
+      },
+      {
+        "from": "../models/deepdoc",
+        "to": "models/deepdoc",
+        "filter": [
+          "**/*.onnx",
+          "**/*.res"
+        ]
+      }
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
+  },
+  "author": "freerag"
+}

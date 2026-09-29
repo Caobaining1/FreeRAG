@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>freerag</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">f</span>
+        <span class="brand-name">freerag</span>
+      </div>
+      <div class="health" id="health"></div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <h2>文档</h2>
+          <button id="add" class="ghost" type="button">添加</button>
+        </div>
+
+        <div id="dropzone" class="dropzone">
+          把 PDF 拖到这里，或点上面的「添加」
+        </div>
+
+        <ul id="documents" class="documents"></ul>
+
+        <div class="sidebar-foot" id="index-summary"></div>
+      </aside>
+
+      <section class="workspace">
+        <form id="ask-form" class="ask">
+          <textarea
+            id="question"
+            rows="2"
+            placeholder="就这些文档提问，回车发送（Shift+回车换行）"
+            spellcheck="false"
+          ></textarea>
+          <button id="ask" class="primary" type="submit">提问</button>
+        </form>
+
+        <div id="progress" class="progress hidden">
+          <div class="progress-head">
+            <span class="spinner"></span>
+            <span id="progress-stage">准备中…</span>
+            <span id="progress-elapsed" class="muted"></span>
+          </div>
+          <pre id="progress-log" class="progress-log"></pre>
+        </div>
+
+        <div id="notice" class="notice hidden"></div>
+
+        <article id="answer" class="answer hidden">
+          <div class="answer-head">
+            <span class="badge" id="verdict"></span>
+            <span class="muted" id="answer-meta"></span>
+          </div>
+          <div class="draft" id="draft"></div>
+          <details class="evidence" open>
+            <summary>证据 <span class="muted" id="evidence-count"></span></summary>
+            <ol id="evidence"></ol>
+          </details>
+        </article>
+
+        <div id="empty" class="empty">
+          <p id="empty-text">还没有索引任何文档。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <span id="kernel-line" class="muted">内核：连接中…</span>
+      <span id="log-line" class="muted"></span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
