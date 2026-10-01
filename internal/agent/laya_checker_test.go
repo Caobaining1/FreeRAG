@@ -20,14 +20,32 @@ type recordingDecide struct {
 	criteria     map[string]string
 	state        string
 	calls        int
+	// kind is what the caller asked to be asked; the bug this records is a
+	// shared decider answering every caller with one question type.
+	kind DecisionKind
 }
 
-func (r *recordingDecide) decide(_ context.Context, instructions string, criteria map[string]string, state string) (string, float64, error) {
+func (r *recordingDecide) decide(_ context.Context, kind DecisionKind, instructions string, criteria map[string]string, state string) (string, float64, error) {
 	r.calls++
+	r.kind = kind
 	r.instructions = instructions
 	r.criteria = criteria
 	r.state = state
 	return r.choice, r.probability, r.err
+}
+
+// oneHit is a pool holding a single passage: the smallest thing the checker can
+// be asked about. Tests that are not about the pool's contents use it, because
+// an empty pool is answered UNKNOWN without consulting the model at all.
+func oneHit() *kbinfo {
+	return infoOf(store.Hit{Chunk: store.Chunk{ChunkID: "c0", Text: "passage"}})
+}
+
+// infoOf builds the store the checker reads from these hits.
+func infoOf(hits ...store.Hit) *kbinfo {
+	info := newKBInfo()
+	info.add(hits)
+	return info
 }
 
 func layaChecker(r *recordingDecide) LayaChecker {
@@ -35,10 +53,10 @@ func layaChecker(r *recordingDecide) LayaChecker {
 }
 
 func TestLayaCheckerAcceptsASufficientDraft(t *testing.T) {
-	recorder := &recordingDecide{choice: "sufficient: the draft answers the question", probability: 0.92}
+	recorder := &recordingDecide{choice: "true", probability: 0.92}
 
 	verdict, missing := layaChecker(recorder).Check(
-		context.Background(), "What is the capital of France?", "The capital of France is Paris.", nil)
+		context.Background(), "What is the capital of France?", oneHit())
 
 	if verdict != VerdictSufficient {
 		t.Fatalf("verdict = %s, want SUFFICIENT", verdict)
@@ -49,22 +67,29 @@ func TestLayaCheckerAcceptsASufficientDraft(t *testing.T) {
 	if recorder.calls != 1 {
 		t.Fatalf("decisions = %d, want 1", recorder.calls)
 	}
-	if recorder.instructions == "" || len(recorder.criteria) != 2 {
-		t.Fatalf("the decision was not asked properly: %q %v", recorder.instructions, recorder.criteria)
+	if len(recorder.criteria) != 2 {
+		t.Fatalf("criteria = %v, want the two noul keys", recorder.criteria)
+	}
+	// The head must be a rendered template carrying the question, not a bare
+	// constant: the model was trained on this set, and a mismatch degrades
+	// calibration without moving accuracy (DEPLOY_CONTRACT.md §3.3).
+	if !strings.Contains(recorder.instructions, "What is the capital of France?") {
+		t.Fatalf("instructions = %q, want the question rendered into a template",
+			recorder.instructions)
 	}
 }
 
 func TestLayaCheckerRejectsAnInsufficientDraft(t *testing.T) {
-	recorder := &recordingDecide{choice: "insufficient: the draft does not answer", probability: 0.97}
+	recorder := &recordingDecide{choice: "false", probability: 0.97}
 
 	question := "How does GRPO differ from PPO?"
 	verdict, missing := layaChecker(recorder).Check(
-		context.Background(), question, "The passages discuss unrelated optimizers.", nil)
+		context.Background(), question, oneHit())
 
 	if verdict != VerdictInsufficient {
 		t.Fatalf("verdict = %s, want INSUFFICIENT", verdict)
 	}
-	// The gap hint must come from the question terms the draft lacks, because the
+	// The gap hint must come from the question terms the answer lacks, because the
 	// rewrite step consumes it to build the next query.
 	if len(missing) == 0 {
 		t.Fatal("an INSUFFICIENT verdict must carry a rewrite hint")
@@ -75,29 +100,29 @@ func TestLayaCheckerRejectsAnInsufficientDraft(t *testing.T) {
 			t.Fatalf("missing = %v, want it to include %q", missing, term)
 		}
 	}
-	// Terms the draft does contain must not be reported as missing.
+	// Terms the answer does contain must not be reported as missing.
 	if strings.Contains(joined, "passages") {
-		t.Fatalf("missing = %v, but the draft does contain \"passages\"", missing)
+		t.Fatalf("missing = %v, but the answer does contain \"passages\"", missing)
 	}
 }
 
 func TestLayaCheckerDowngradesALowConfidenceSufficient(t *testing.T) {
 	// A coin-flip "sufficient" is reported as UNKNOWN rather than acted on: the
 	// loop then keeps looking instead of declaring victory.
-	recorder := &recordingDecide{choice: "sufficient: answers it", probability: 0.41}
+	recorder := &recordingDecide{choice: "true", probability: 0.41}
 
-	verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", "some draft", nil)
+	verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", oneHit())
 	if verdict != VerdictUnknown {
 		t.Fatalf("verdict = %s, want UNKNOWN for a low-probability SUFFICIENT", verdict)
 	}
 }
 
 func TestLayaCheckerThresholdIsConfigurable(t *testing.T) {
-	recorder := &recordingDecide{choice: "sufficient: answers it", probability: 0.41}
+	recorder := &recordingDecide{choice: "true", probability: 0.41}
 
 	checker := layaChecker(recorder)
 	checker.MinProbability = 0.3
-	if verdict, _ := checker.Check(context.Background(), "q?", "draft", nil); verdict != VerdictSufficient {
+	if verdict, _ := checker.Check(context.Background(), "q?", oneHit()); verdict != VerdictSufficient {
 		t.Fatalf("verdict = %s, want SUFFICIENT once the threshold is lowered", verdict)
 	}
 }
@@ -107,55 +132,69 @@ func TestLayaCheckerThresholdIsConfigurable(t *testing.T) {
 func TestLayaCheckerReportsUnknownWhenTheModelFails(t *testing.T) {
 	recorder := &recordingDecide{err: errors.New("sidecar unreachable")}
 
-	verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", "draft", nil)
+	verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", oneHit())
 	if verdict != VerdictUnknown {
 		t.Fatalf("verdict = %s, want UNKNOWN when the model errors", verdict)
 	}
 }
 
-func TestLayaCheckerReportsUnknownWithoutAModelOrDraft(t *testing.T) {
-	if verdict, _ := (LayaChecker{}).Check(context.Background(), "q?", "draft", nil); verdict != VerdictUnknown {
+func TestLayaCheckerReportsUnknownWithoutAModelOrAnEmptyPool(t *testing.T) {
+	if verdict, _ := (LayaChecker{}).Check(context.Background(), "q?", oneHit()); verdict != VerdictUnknown {
 		t.Fatalf("verdict = %s, want UNKNOWN with no decider", verdict)
 	}
 
-	recorder := &recordingDecide{choice: "sufficient: x", probability: 0.99}
-	if verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", "   ", nil); verdict != VerdictUnknown {
-		t.Fatalf("verdict = %s, want UNKNOWN for an empty draft", verdict)
+	// An empty pool is not judged: there is nothing in it to judge, and asking
+	// anyway would manufacture a verdict out of an empty state.
+	recorder := &recordingDecide{choice: "true", probability: 0.99}
+	if verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", newKBInfo()); verdict != VerdictUnknown {
+		t.Fatalf("verdict = %s, want UNKNOWN for an empty pool", verdict)
 	}
 	if recorder.calls != 0 {
-		t.Fatal("an empty draft must not reach the model")
+		t.Fatal("an empty pool must not reach the model")
 	}
 }
 
 func TestLayaCheckerReportsUnknownOnAnUnrecognisedChoice(t *testing.T) {
 	recorder := &recordingDecide{choice: "maybe: unclear", probability: 0.7}
-	if verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", "draft", nil); verdict != VerdictUnknown {
+	if verdict, _ := layaChecker(recorder).Check(context.Background(), "q?", oneHit()); verdict != VerdictUnknown {
 		t.Fatalf("verdict = %s, want UNKNOWN for an option we do not know", verdict)
 	}
 }
 
-// §6.6: Laya sees the draft only. Feeding it the raw passages would blow its
-// small window and move the groundedness question into the wrong model.
-func TestLayaCheckerSendsOnlyTheQuestionAndDraft(t *testing.T) {
-	recorder := &recordingDecide{choice: "sufficient: answers it", probability: 0.9}
+// Laya judges the evidence, not the answer.
+//
+// This test used to assert the opposite — "§6.6: Laya sees the answer only" —
+// because the old window was 512 tokens. That is exactly the constraint the 32k
+// context work removed: the model is now trained on "is this evidence enough to
+// answer the question", so the passages are the in-distribution input and
+// withholding them would be the defect (DEPLOY_CONTRACT.md §10.2).
+func TestLayaCheckerSendsTheEvidence(t *testing.T) {
+	recorder := &recordingDecide{choice: "true", probability: 0.9}
 
 	evidence := []store.Hit{
 		{Chunk: store.Chunk{ChunkID: "c0", Text: "SECRETPASSAGE one two three"}},
 		{Chunk: store.Chunk{ChunkID: "c1", Text: "SECRETPASSAGE four five six"}},
 	}
-	layaChecker(recorder).Check(context.Background(), "What is X?", "X is Y.", evidence)
+	layaChecker(recorder).Check(context.Background(), "What is X?", infoOf(evidence...))
 
-	if strings.Contains(recorder.state, "SECRETPASSAGE") {
-		t.Fatalf("the state leaked evidence into the decision: %q", recorder.state)
+	if !strings.Contains(recorder.state, "SECRETPASSAGE") {
+		t.Fatalf("the state dropped the evidence: %q", recorder.state)
 	}
-	if !strings.Contains(recorder.state, "What is X?") || !strings.Contains(recorder.state, "X is Y.") {
-		t.Fatalf("state = %q, want question and draft", recorder.state)
+	// The answer is not part of the trained task. It still drives the rewrite
+	// hint through missingFromEvidence, which is a separate concern from the input.
+	if strings.Contains(recorder.state, "X is Y.") {
+		t.Fatalf("the answer leaked into the decision state: %q", recorder.state)
+	}
+	// The question reaches the model through the head, so it is not repeated in
+	// the state — but it must be there.
+	if !strings.Contains(recorder.instructions, "What is X?") {
+		t.Fatalf("instructions = %q, want the question rendered in", recorder.instructions)
 	}
 }
 
-func TestMissingFromDraftIsCapped(t *testing.T) {
+func TestMissingFromEvidenceIsCapped(t *testing.T) {
 	long := strings.Repeat("alpha beta gamma delta epsilon zeta eta theta iota kappa ", 5)
-	missing := missingFromDraft(long, "nothing in common")
+	missing := missingFromEvidence(long, infoOf(store.Hit{Chunk: store.Chunk{Text: "nothing in common"}}))
 	if len(missing) > maxMissingTerms {
 		t.Fatalf("missing = %d terms, want at most %d", len(missing), maxMissingTerms)
 	}

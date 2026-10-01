@@ -2,6 +2,9 @@
 /bin/
 /dist/
 /out/
+# A bare `go build` at the repo root drops the binary here (7.8 MB, Mach-O).
+# /bin/freerag is the intended output; this one is an accident of `go build -o freerag`.
+/freerag
 
 # Local runtime data (SQLite + sqlite-vec, parsed cache)
 /data/

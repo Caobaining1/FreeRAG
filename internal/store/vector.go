@@ -74,11 +74,16 @@ func cosine(a, b []float32) float64 {
 // mismatch means the vectors came from different models, and ranking them
 // anyway would return plausible-looking nonsense.
 func (s *Store) SearchVector(vector []float32, limit int) []Hit {
+	return s.SearchVectorIn(vector, limit, Filter{})
+}
+
+// SearchVectorIn is SearchVector restricted to the documents a Filter admits.
+func (s *Store) SearchVectorIn(vector []float32, limit int, filter Filter) []Hit {
 	if len(vector) == 0 {
 		return nil
 	}
 
-	if hits, ok := s.searchDense(vector, limit); ok {
+	if hits, ok := s.searchDense(vector, limit, filter); ok {
 		return hits
 	}
 
@@ -96,6 +101,9 @@ func (s *Store) SearchVector(vector []float32, limit int) []Hit {
 	ranked := make([]scored, 0, len(s.chunks))
 	for i := range s.chunks {
 		if i >= len(s.vectors) || len(s.vectors[i]) == 0 {
+			continue
+		}
+		if !filter.Allows(s.chunks[i].DocID) {
 			continue
 		}
 		score := cosine(vector, s.vectors[i])
@@ -139,6 +147,15 @@ func (s *Store) SearchVector(vector []float32, limit int) []Hit {
 // Either half may be empty: with no embedder, or a query the keyword index
 // cannot match, this degrades to the other ranker's ranking rather than failing.
 func (s *Store) Hybrid(query string, vector []float32, limit int) []Hit {
+	return s.HybridIn(query, vector, limit, Filter{})
+}
+
+// HybridIn is Hybrid restricted to the documents a Filter admits.
+//
+// Both legs are scoped. Scoping one and not the other would let the unfiltered
+// leg refill the pool with documents the scope excludes, and the fusion would
+// report a ranking the filter was supposed to prevent.
+func (s *Store) HybridIn(query string, vector []float32, limit int, filter Filter) []Hit {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -147,8 +164,8 @@ func (s *Store) Hybrid(query string, vector []float32, limit int) []Hit {
 		pool = defaultFusionPool
 	}
 
-	keyword := s.Search(query, pool)
-	dense := s.SearchVector(vector, pool)
+	keyword := s.SearchIn(query, pool, filter)
+	dense := s.SearchVectorIn(vector, pool, filter)
 
 	type fused struct {
 		chunk   Chunk

@@ -255,6 +255,12 @@ func (s *Store) All() []Chunk {
 // An empty query, or one whose terms are all unknown, returns no hits: a search
 // that matches nothing must not look like a search that matched everything.
 func (s *Store) Search(query string, limit int) []Hit {
+	return s.SearchIn(query, limit, Filter{})
+}
+
+// SearchIn is Search restricted to the documents a Filter admits (see Filter for
+// why the restriction is applied here and not to the results).
+func (s *Store) SearchIn(query string, limit int, filter Filter) []Hit {
 	queryTerms := Terms(query)
 	if len(queryTerms) == 0 {
 		return nil
@@ -305,7 +311,7 @@ func (s *Store) Search(query string, limit int) []Hit {
 
 	order := make([]int, 0, total)
 	for i := range s.chunks {
-		if scores[i] > 0 {
+		if scores[i] > 0 && filter.Allows(s.chunks[i].DocID) {
 			order = append(order, i)
 		}
 	}

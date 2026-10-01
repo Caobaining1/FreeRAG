@@ -31,6 +31,158 @@ func TestStripThink(t *testing.T) {
 	}
 }
 
+func TestThinkFilter(t *testing.T) {
+	// Every case is fed as a sequence of chunks, because that is the only thing
+	// that distinguishes this from StripThink: where the server happens to split
+	// the text must not change what the user sees.
+	cases := []struct {
+		name   string
+		chunks []string
+		want   string
+	}{
+		{"plain text passes through", []string{"hello", " world"}, "hello world"},
+		{"a block in one chunk", []string{"a<think>hidden</think>b"}, "ab"},
+		{"opening tag split across chunks", []string{"a<thi", "nk>hidden</think>b"}, "ab"},
+		{"closing tag split across chunks", []string{"a<think>hidden</thi", "nk>b"}, "ab"},
+		{"an ordinary angle bracket is not a tag", []string{"a <", " b"}, "a < b"},
+		{"unterminated block is dropped", []string{"a<think>never closed"}, "a"},
+		{"a tag split three ways", []string{"abc<", "thi", "nk>d</think>e"}, "abce"},
+		{"empty chunks are harmless", []string{"", "a", "", "b", ""}, "ab"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var filter thinkFilter
+			var out strings.Builder
+			for _, chunk := range tc.chunks {
+				out.WriteString(filter.write(chunk))
+			}
+			out.WriteString(filter.flush())
+
+			if out.String() != tc.want {
+				t.Fatalf("streamed %q, want %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// streamServer replies with the given chunks as newline-delimited JSON, which is
+// how Ollama streams, and returns the server plus the decoded request.
+func streamServer(t *testing.T, chunks ...map[string]any) (*httptest.Server, *ollamaChatRequest) {
+	t.Helper()
+
+	received := &ollamaChatRequest{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(received); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		encoder := json.NewEncoder(w)
+		for _, chunk := range chunks {
+			if err := encoder.Encode(chunk); err != nil {
+				t.Errorf("encode chunk: %v", err)
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server, received
+}
+
+func TestCompleteStreamEmitsDeltasAndMatchesComplete(t *testing.T) {
+	server, received := streamServer(t,
+		map[string]any{"message": map[string]string{"role": "assistant", "content": "The answer "}, "done": false},
+		map[string]any{"message": map[string]string{"role": "assistant", "content": "is 42 [1]."}, "done": false},
+		map[string]any{"message": map[string]string{"role": "assistant", "content": ""}, "done": true},
+	)
+
+	var deltas []string
+	reply, err := (&OllamaModel{BaseURL: server.URL, Model: "m"}).CompleteStream(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil,
+		func(delta string) { deltas = append(deltas, delta) })
+	if err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+
+	if !received.Stream {
+		t.Fatal("stream must be true, or the server sends one reply and nothing is incremental")
+	}
+	// The deltas have to assemble into the Reply the caller also receives: a UI
+	// that renders them would otherwise show text the result does not contain.
+	if joined := strings.Join(deltas, ""); joined != reply.Content {
+		t.Fatalf("deltas join to %q but Content is %q", joined, reply.Content)
+	}
+	if reply.Content != "The answer is 42 [1]." {
+		t.Fatalf("Content = %q", reply.Content)
+	}
+}
+
+func TestCompleteStreamHidesReasoningSplitAcrossChunks(t *testing.T) {
+	// The case thinkFilter exists for. A per-chunk StripThink matches neither
+	// half of the tag, so the user would watch the model reason — which is
+	// exactly what StripThink was added to prevent.
+	server, _ := streamServer(t,
+		map[string]any{"message": map[string]string{"content": "Before. <thi"}, "done": false},
+		map[string]any{"message": map[string]string{"content": "nk>private reasoning</thi"}, "done": false},
+		map[string]any{"message": map[string]string{"content": "nk>After."}, "done": false},
+		map[string]any{"message": map[string]string{"content": ""}, "done": true},
+	)
+
+	var deltas []string
+	reply, err := (&OllamaModel{BaseURL: server.URL, Model: "m"}).CompleteStream(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil,
+		func(delta string) { deltas = append(deltas, delta) })
+	if err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+
+	streamed := strings.Join(deltas, "")
+	if strings.Contains(streamed, "private reasoning") {
+		t.Fatalf("streamed %q, want the reasoning withheld", streamed)
+	}
+	if streamed != "Before. After." {
+		t.Fatalf("streamed %q, want the text around the block", streamed)
+	}
+	if reply.Content != "Before. After." {
+		t.Fatalf("Content = %q", reply.Content)
+	}
+}
+
+func TestCompleteStreamCollectsToolCalls(t *testing.T) {
+	server, _ := streamServer(t,
+		map[string]any{"message": map[string]any{"role": "assistant", "content": ""}, "done": false},
+		map[string]any{
+			"message": map[string]any{
+				"role": "assistant",
+				"tool_calls": []any{
+					map[string]any{"function": map[string]any{
+						"name": "hybrid_search", "arguments": map[string]any{"query": "x"},
+					}},
+					// Nameless, so undispatable; decodeToolCalls drops it.
+					map[string]any{"function": map[string]any{"name": ""}},
+				},
+			},
+			"done": true,
+		},
+	)
+
+	reply, err := (&OllamaModel{BaseURL: server.URL, Model: "m"}).CompleteStream(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, ToolSpecs(), nil)
+	if err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+
+	if len(reply.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want the named one only", reply.ToolCalls)
+	}
+	if reply.ToolCalls[0].Name != "hybrid_search" {
+		t.Fatalf("name = %q", reply.ToolCalls[0].Name)
+	}
+	if reply.ToolCalls[0].Arguments["query"] != "x" {
+		t.Fatalf("arguments = %#v", reply.ToolCalls[0].Arguments)
+	}
+}
+
 func TestOllamaForwardsThinkAndKeepAlive(t *testing.T) {
 	var received ollamaChatRequest
 
@@ -225,7 +377,7 @@ func TestOllamaCompleteOmitsToolsWhenNoneAreOffered(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 
-	// A draft turn must not advertise tools: the model would be free to answer
+	// A answer turn must not advertise tools: the model would be free to answer
 	// with a call instead of the text the checker is waiting for.
 	if len(received.Tools) != 0 {
 		t.Fatalf("tools = %#v, want none", received.Tools)
@@ -297,5 +449,54 @@ func TestOllamaReachable(t *testing.T) {
 	offline := &OllamaModel{BaseURL: "http://127.0.0.1:1", Model: "freerag-qwen3"}
 	if offline.Reachable(context.Background()) {
 		t.Fatal("unreachable server should not be reported reachable")
+	}
+}
+
+func TestUnloadModelAsksOllamaToEvictNow(t *testing.T) {
+	var (
+		path string
+		body map[string]any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"done":true}`)
+	}))
+	defer server.Close()
+
+	if err := UnloadModel(context.Background(), server.URL, "qwen3-vl:4b"); err != nil {
+		t.Fatalf("UnloadModel: %v", err)
+	}
+	if path != "/api/generate" {
+		t.Fatalf("path = %q, want /api/generate", path)
+	}
+	if body["model"] != "qwen3-vl:4b" {
+		t.Fatalf("model = %#v", body["model"])
+	}
+	// keep_alive: 0 is Ollama's unload, and it is a number, not a duration
+	// string — "0s" would mean "keep for zero seconds", which Ollama treats as
+	// the default rather than as an eviction.
+	if value, ok := body["keep_alive"].(float64); !ok || value != 0 {
+		t.Fatalf("keep_alive = %#v, want the number 0", body["keep_alive"])
+	}
+}
+
+func TestUnloadModelWithoutAModelIsANoOp(t *testing.T) {
+	// "vision is off" must not become an error, and must not call out at all —
+	// the unreachable address proves nothing was dialled.
+	if err := UnloadModel(context.Background(), "http://127.0.0.1:1", "   "); err != nil {
+		t.Fatalf("UnloadModel with no model: %v", err)
+	}
+}
+
+func TestUnloadModelReportsAFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	}))
+	defer server.Close()
+
+	if err := UnloadModel(context.Background(), server.URL, "qwen3-vl:4b"); err == nil {
+		t.Fatal("an HTTP failure must be reported, not swallowed")
 	}
 }

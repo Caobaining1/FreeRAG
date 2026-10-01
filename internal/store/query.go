@@ -21,6 +21,11 @@ type GrepHit struct {
 // at — identifiers, codes and rare proper nouns, where the exact characters
 // matter more than the surrounding words.
 func (s *Store) Grep(pattern string, useRegex bool, limit int) ([]GrepHit, error) {
+	return s.GrepIn(pattern, useRegex, limit, Filter{})
+}
+
+// GrepIn is Grep restricted to the documents a Filter admits.
+func (s *Store) GrepIn(pattern string, useRegex bool, limit int, filter Filter) ([]GrepHit, error) {
 	pattern = strings.TrimSpace(pattern)
 	if pattern == "" {
 		return nil, nil
@@ -41,6 +46,9 @@ func (s *Store) Grep(pattern string, useRegex bool, limit int) ([]GrepHit, error
 
 	hits := make([]GrepHit, 0, 8)
 	for _, chunk := range s.chunks {
+		if !filter.Allows(chunk.DocID) {
+			continue
+		}
 		var (
 			line  string
 			count int
@@ -105,56 +113,6 @@ func (s *Store) List(docID string, page, offset, limit int) []Chunk {
 		}
 	}
 	return out
-}
-
-// MetadataFilter selects chunks by their metadata fields alone — no text
-// matching, so it answers "which chunks are tables on page 3 of a.pdf".
-type MetadataFilter struct {
-	DocID      string `json:"doc_id,omitempty"`
-	SourceFile string `json:"source_file,omitempty"`
-	BlockType  string `json:"block_type,omitempty"`
-	Page       int    `json:"page,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-}
-
-// MetadataSearch returns chunks matching every non-empty field.
-func (s *Store) MetadataSearch(filter MetadataFilter) []Chunk {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	out := make([]Chunk, 0, 16)
-	for _, chunk := range s.chunks {
-		if filter.DocID != "" && chunk.DocID != filter.DocID {
-			continue
-		}
-		if filter.BlockType != "" && !strings.EqualFold(chunk.BlockType, filter.BlockType) {
-			continue
-		}
-		if filter.Page > 0 && chunk.PageNum != filter.Page {
-			continue
-		}
-		if filter.SourceFile != "" && !matchesSourceFile(chunk, filter.SourceFile) {
-			continue
-		}
-		out = append(out, chunk)
-		if filter.Limit > 0 && len(out) >= filter.Limit {
-			break
-		}
-	}
-	return out
-}
-
-// matchesSourceFile checks the chunk's doc id and its source_file metadata
-// field, so callers can pass whichever they have.
-func matchesSourceFile(chunk Chunk, want string) bool {
-	if strings.EqualFold(chunk.DocID, want) {
-		return true
-	}
-	if chunk.Metadata == nil {
-		return false
-	}
-	value, ok := chunk.Metadata["source_file"].(string)
-	return ok && strings.EqualFold(value, want)
 }
 
 // Documents returns the distinct document ids in stored order, so a caller can

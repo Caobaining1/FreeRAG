@@ -33,7 +33,29 @@ DEFAULT_LIMIT_BYTES = 256 * 1024 * 1024
 #: 2: table regions now go through TSR before ruling-line extraction, so the
 #:    same PDF yields different (structured) chunks. Version 1 entries describe
 #:    the flattened text and must not be served.
-CACHE_VERSION = "2"
+#: 3: chunking now merges blocks (TUIrag strategy B: title + body, buffered
+#:    paragraphs, table/figure + caption), so every document's chunk list differs
+#:    from version 2 even when the options are identical.
+#: 4: layout blocks come back in reading order (XY-cut, not a row-major sweep),
+#:    so a two-column page's chunks are no longer interleaved across columns.
+#: 5: a merged chunk now also carries `pieces`, the source rectangles it was
+#:    folded from, which is what the chunk inspector draws instead of the
+#:    bounding box that spans the whole corner between them.
+#: 6: `pieces` is gone again — the merge no longer folds blocks that are not
+#:    stacked in one column, so every chunk's bounding box is the region it
+#:    actually occupies and one rectangle is the honest drawing.
+#: 7: the merge ceiling is ~2.5x larger and a caption above its table/figure is
+#:    absorbed too, so a section is no longer split into several chunks.
+#: 8: a caption the detector left typed as body text ("Table 4: ...") is
+#:    re-typed and attached, instead of becoming its own chunk or being absorbed
+#:    into the paragraph below it.
+#: 9: a detection sitting inside a larger one of the same type is dropped, so a
+#:    region found twice no longer yields two blocks with the same text.
+#: 10: a Figure region can now be described by a vision model, so the same PDF
+#:    yields different Figure chunks when that is enabled. The model name is
+#:    part of the key (two models are two different caption texts), and a version
+#:    bump is needed regardless because a version-9 entry has no description.
+CACHE_VERSION = "11"
 
 
 def cache_dir() -> str:
@@ -47,8 +69,15 @@ def cache_key(
     max_chars: Optional[int],
     max_pages: int,
     layout: str,
+    vlm: str = "",
 ) -> str:
-    """Identity of one parse request."""
+    """Identity of one parse request.
+
+    ``vlm`` is the vision model describing figures, or "" when that is off. It
+    belongs in the key for the same reason every other option does: two models
+    write different text into the chunk, so a hit across them would return
+    chunks that were never produced under the rules now in force.
+    """
     stat = os.stat(path)
     parts = (
         CACHE_VERSION,
@@ -59,6 +88,7 @@ def cache_key(
         str(max_chars if max_chars is not None else ""),
         str(max_pages),
         layout,
+        vlm,
     )
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 

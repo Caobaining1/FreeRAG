@@ -15,7 +15,7 @@ import (
 // The context window must be requested explicitly: Ollama's default is 4096,
 // smaller than the evidence block the loop assembles, and an oversized prompt is
 // rejected with HTTP 400 rather than truncated. This was hit for real — a
-// two-round question built a 7647-token prompt and the draft silently degraded
+// two-round question built a 7647-token prompt and the answer silently degraded
 // to the extractive fallback.
 func TestOllamaCompleteSendsNumCtx(t *testing.T) {
 	var received ollamaChatRequest
@@ -88,7 +88,7 @@ func manyHits(count int) []store.Hit {
 
 func TestRenderEvidenceWithoutBudgetKeepsEveryPassage(t *testing.T) {
 	hits := manyHits(10)
-	rendered := renderEvidence("why?", hits, 0)
+	rendered := renderEvidence("why?", hits, 0, "")
 
 	// Passages are numbered rather than identified by chunk id, so the citation
 	// markers are what must all be present.
@@ -104,8 +104,8 @@ func TestRenderEvidenceWithoutBudgetKeepsEveryPassage(t *testing.T) {
 
 func TestRenderEvidenceTruncatesToBudget(t *testing.T) {
 	hits := manyHits(10)
-	unbounded := renderEvidence("why?", hits, 0)
-	bounded := renderEvidence("why?", hits, 1500)
+	unbounded := renderEvidence("why?", hits, 0, "")
+	bounded := renderEvidence("why?", hits, 1500, "")
 
 	// The budget bounds the evidence block; only the omission note may push the
 	// total slightly past it.
@@ -134,7 +134,7 @@ func TestRenderEvidenceTruncatesToBudget(t *testing.T) {
 func TestRenderEvidenceStopsWhenNoRoomRemains(t *testing.T) {
 	// A budget too small for a single passage yields the header and the note,
 	// never a truncated stub that would mislead the model.
-	rendered := renderEvidence("why?", manyHits(3), 40)
+	rendered := renderEvidence("why?", manyHits(3), 40, "")
 	if !strings.Contains(rendered, "Question: why?") {
 		t.Fatalf("rendered = %q", rendered)
 	}
@@ -145,11 +145,11 @@ func TestRenderEvidenceStopsWhenNoRoomRemains(t *testing.T) {
 
 func TestExtractiveDraftStillWorksWithoutAModel(t *testing.T) {
 	hits := manyHits(3)
-	draft := extractiveDraft(hits)
-	if !strings.Contains(draft, "[1]") || !strings.Contains(draft, "[2]") {
-		t.Fatalf("extractive draft = %q", draft)
+	answer := extractiveAnswer(hits)
+	if !strings.Contains(answer, "[1]") || !strings.Contains(answer, "[2]") {
+		t.Fatalf("extractive answer = %q", answer)
 	}
-	if strings.Contains(draft, "\n\n") {
+	if strings.Contains(answer, "\n\n") {
 		t.Fatal("extractive passages must collapse onto one line each")
 	}
 }

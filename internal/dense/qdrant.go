@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -50,6 +51,17 @@ type Qdrant struct {
 	EfSearch    int
 	Timeout     time.Duration
 	HTTP        *http.Client
+	// Logger receives the warnings that are not worth failing over. nil means
+	// log.Default().
+	Logger *log.Logger
+}
+
+// loggerOr returns the configured logger, or the process default.
+func (q *Qdrant) loggerOr() *log.Logger {
+	if q.Logger != nil {
+		return q.Logger
+	}
+	return log.Default()
 }
 
 // FromEnv builds a Qdrant index from the environment, or returns (nil, nil)
@@ -59,6 +71,21 @@ type Qdrant struct {
 // degraded mode — but a *broken* one is, because silently continuing would
 // leave the operator believing dense retrieval is on.
 func FromEnv(dims int) (*Qdrant, error) {
+	return FromEnvCollection(dims, envStr("FREERAG_QDRANT_COLLECTION", DefaultCollection))
+}
+
+// FromEnvCollection is FromEnv with an explicit collection name.
+//
+// Each knowledge base gets its own collection (internal/kb), and that is what
+// makes the isolation structural rather than a convention: a shared collection
+// would need a payload filter on every query and every delete, and the first
+// call site that forgot one would return another base's passages — a leak whose
+// output still looks like a plausible answer, so nothing downstream would flag
+// it.
+//
+// A nil client with a nil error means Qdrant is not configured at all. That is a
+// supported state, not a failure: dense ranking then runs in-process.
+func FromEnvCollection(dims int, collection string) (*Qdrant, error) {
 	url := os.Getenv("FREERAG_QDRANT_URL")
 	if url == "" {
 		return nil, nil
@@ -69,7 +96,7 @@ func FromEnv(dims int) (*Qdrant, error) {
 
 	client := &Qdrant{
 		BaseURL:     url,
-		Collection:  envStr("FREERAG_QDRANT_COLLECTION", DefaultCollection),
+		Collection:  collection,
 		Dims:        dims,
 		M:           envInt("FREERAG_QDRANT_M", DefaultM),
 		EfConstruct: envInt("FREERAG_QDRANT_EF_CONSTRUCT", DefaultEfConstruct),
@@ -207,7 +234,45 @@ func (q *Qdrant) EnsureCollection() error {
 			"dense: collection %q holds %d-dimensional vectors but the embedder provides %d",
 			q.collection(), size, q.Dims)
 	}
+
+	// Ensured for a collection that already existed as much as for one just
+	// created. A knowledge base indexed before this ran has no payload index,
+	// and nothing else would ever add one to it: it would keep scanning, which
+	// is exactly the case this is here to fix.
+	q.ensurePayloadIndexes()
 	return nil
+}
+
+// payloadIndexFields are the payload fields a request filters on.
+//
+// doc_id, because that is what a document scope filters by (SearchScoped) and
+// what Delete drops by. Neither names chunk_id, so it is not indexed: an index
+// nothing queries is storage and write cost for nothing.
+var payloadIndexFields = []string{"doc_id"}
+
+// ensurePayloadIndexes creates the payload indexes a filtered request needs.
+//
+// Without one, qdrant answers a doc_id filter by examining every point, which
+// turns a scope from a narrowing into a slowdown — the opposite of what it is
+// for. With one, the filter is an index lookup and the search only visits the
+// scoped points.
+//
+// A failure here is logged and swallowed rather than returned. The filter still
+// works without the index (it is just slow), so this is a performance cliff and
+// not a correctness one, and the realistic causes — a qdrant older than the
+// /index endpoint, or a read-only context — are not reasons to bring dense
+// retrieval down. The message says what the cost is, so it is not silent.
+func (q *Qdrant) ensurePayloadIndexes() {
+	for _, field := range payloadIndexFields {
+		if _, _, err := q.do(http.MethodPut,
+			fmt.Sprintf("/collections/%s/index", q.collection()),
+			map[string]any{"field_name": field, "field_schema": "keyword"}); err != nil {
+			q.loggerOr().Printf(
+				"warning: could not create the %q payload index on collection %q (%v); "+
+					"searches filtered by %s will scan every point",
+				field, q.collection(), err, field)
+		}
+	}
 }
 
 // configSize reads the vector width out of a collection description.
@@ -292,18 +357,49 @@ func (q *Qdrant) Upsert(chunks []store.Chunk, vectors [][]float32) error {
 // matches by document and chunk id, and a match without them cannot be
 // resolved to anything.
 func (q *Qdrant) Search(vector []float32, limit int) ([]store.DenseMatch, error) {
+	return q.search(vector, limit, nil)
+}
+
+// SearchScoped implements store.ScopedDenseIndex: it restricts the nearest
+// neighbour search itself, rather than letting the caller sift a global top-k.
+//
+// The restriction goes in the request body as a payload filter over doc_id,
+// which is the field Upsert writes. Without it a scoped query over a corpus
+// where the scoped document is not globally near the top would come back empty
+// even though that document contains what was asked for.
+func (q *Qdrant) SearchScoped(vector []float32, limit int, docIDs []string) ([]store.DenseMatch, error) {
+	if len(docIDs) == 0 {
+		return q.search(vector, limit, nil)
+	}
+	return q.search(vector, limit, map[string]any{
+		// `any` rather than one condition per document: one clause keeps the
+		// request the same shape whether the scope holds one file or four
+		// hundred.
+		"must": []any{map[string]any{
+			"key":   "doc_id",
+			"match": map[string]any{"any": docIDs},
+		}},
+	})
+}
+
+func (q *Qdrant) search(vector []float32, limit int, filter map[string]any) ([]store.DenseMatch, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 
+	body := map[string]any{
+		"vector":       vector,
+		"limit":        limit,
+		"with_payload": true,
+		"params":       map[string]any{"hnsw_ef": q.EfSearch, "exact": false},
+	}
+	if filter != nil {
+		body["filter"] = filter
+	}
+
 	response, _, err := q.do(http.MethodPost,
 		fmt.Sprintf("/collections/%s/points/search", q.collection()),
-		map[string]any{
-			"vector":       vector,
-			"limit":        limit,
-			"with_payload": true,
-			"params":       map[string]any{"hnsw_ef": q.EfSearch, "exact": false},
-		})
+		body)
 	if err != nil {
 		return nil, err
 	}
@@ -340,6 +436,36 @@ func (q *Qdrant) Delete(docID string) error {
 			}},
 		}})
 	return err
+}
+
+// DropCollection deletes a collection by name, without ensuring it exists first.
+//
+// Deliberately not FromEnvCollection followed by Drop: that path creates the
+// collection when it is absent, so deleting a knowledge base that never had an
+// index would create one in order to delete it. Worse, it would fail on a width
+// mismatch — and a cleanup path that cannot run is a leak, which is the thing
+// this exists to prevent.
+//
+// A collection that is already gone is not an error.
+func DropCollection(name string) error {
+	url := os.Getenv("FREERAG_QDRANT_URL")
+	if url == "" {
+		return nil
+	}
+	return (&Qdrant{BaseURL: url, Collection: name}).Drop()
+}
+
+// Drop deletes the whole collection.
+//
+// Used when a knowledge base is removed, so its vectors do not outlive it. A
+// collection that was never created is not an error: deleting a base no document
+// was ever added to is a normal outcome rather than a failure.
+func (q *Qdrant) Drop() error {
+	_, status, err := q.do(http.MethodDelete, "/collections/"+q.collection(), nil)
+	if err != nil && status != http.StatusNotFound {
+		return err
+	}
+	return nil
 }
 
 // Len implements store.DenseIndex.

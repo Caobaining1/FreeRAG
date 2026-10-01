@@ -19,7 +19,14 @@ from typing import Any, Dict, List, Sequence
 
 import numpy as np
 
-from layout_onnx import _nms, _resize_bilinear, default_providers, _env_int, DEFAULT_CPU_THREADS
+from layout_onnx import (
+    DEFAULT_CPU_THREADS,
+    _env_int,
+    _nms,
+    _resize_bilinear,
+    default_providers,
+    session_for,
+)
 
 #: Model input side length and candidate count (tsr.go: tsrInputSize / tsrCandidates).
 INPUT_SIZE = 640
@@ -172,20 +179,31 @@ class TSRDetector:
         return ";".join(session.get_providers())
 
     def _load(self) -> Any:
-        if self._session is None:
-            import onnxruntime
+        """The shared session for this configuration (see layout_onnx.session_for).
 
+        TSR brings its own builder rather than using make_session_options: it
+        does not turn the memory pattern off the way the layout model does, and
+        that flag was measured on the layout model only. The two models live in
+        different files, so their registry entries cannot collide.
+        """
+        if self._session is None:
             if not self.available:
                 raise FileNotFoundError(f"TSR model not found: {self.path}")
-
             providers = self.providers or default_providers()
-            options = onnxruntime.SessionOptions()
-            if providers[0] == "CPUExecutionProvider":
-                options.intra_op_num_threads = self.cpu_threads
-            self._session = onnxruntime.InferenceSession(
-                self.path, sess_options=options, providers=providers
+            self._session = session_for(
+                self.path, providers, self.cpu_threads, build=lambda: self._build(providers)
             )
         return self._session
+
+    def _build(self, providers: Sequence[str]) -> Any:
+        import onnxruntime
+
+        options = onnxruntime.SessionOptions()
+        if providers[0] == "CPUExecutionProvider":
+            options.intra_op_num_threads = self.cpu_threads
+        return onnxruntime.InferenceSession(
+            self.path, sess_options=options, providers=list(providers)
+        )
 
     def detect(self, rgb: np.ndarray) -> List[Dict[str, Any]]:
         """Detect structure in one cropped table bitmap; boxes in crop pixels."""

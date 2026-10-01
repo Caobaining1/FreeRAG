@@ -11,6 +11,38 @@
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+/**
+ * The theme this window was opened in, handed down by the main process.
+ *
+ * Read out of process.argv rather than asked for over IPC because IPC is
+ * asynchronous: the stylesheet's own default is the dark palette, so a theme
+ * applied after the first paint is a light-theme start that flashes black. The
+ * window's backgroundColor covers the chrome; this covers the content.
+ */
+function themeFromArgv() {
+  const prefix = '--freerag-theme=';
+  const flag = (process.argv || []).find((arg) => arg.startsWith(prefix));
+  return flag ? flag.slice(prefix.length) : '';
+}
+
+const initialTheme = themeFromArgv();
+if (initialTheme) {
+  const apply = () => {
+    if (!document.documentElement) return false;
+    document.documentElement.dataset.theme = initialTheme;
+    return true;
+  };
+  if (!apply()) {
+    // This script runs before the parser has produced anything, so <html> may
+    // not exist yet. Watched rather than deferred to DOMContentLoaded, which
+    // fires after the page has been parsed — and parsed is rendered.
+    const observer = new MutationObserver(() => {
+      if (apply()) observer.disconnect();
+    });
+    observer.observe(document, { childList: true, subtree: true });
+  }
+}
+
 contextBridge.exposeInMainWorld('freerag', {
   /** Calls a Go-kernel RPC method. Resolves with { ok, result } | { ok, error }. */
   rpc: (method, params) => ipcRenderer.invoke('rpc', method, params),
@@ -23,6 +55,25 @@ contextBridge.exposeInMainWorld('freerag', {
 
   /** Opens the native file picker. Resolves with absolute paths, [] if cancelled. */
   pickFiles: () => ipcRenderer.invoke('pick-files'),
+
+  /** Reads the chat history. Resolves with { ok, data } | { ok, error }. */
+  loadChats: () => ipcRenderer.invoke('chat-load'),
+
+  /** Writes the chat history. Resolves with { ok } | { ok, error }. */
+  saveChats: (payload) => ipcRenderer.invoke('chat-save', payload),
+
+  /**
+   * Reads the shell's preferences.
+   *
+   * Resolves with { ok, data: { theme, source, themes } }. The theme it returns
+   * is the one already applied above; it is re-read so the UI can say WHERE the
+   * current theme came from (the user, the environment, or the OS) instead of
+   * presenting an inherited default as a choice.
+   */
+  loadPrefs: () => ipcRenderer.invoke('prefs-load'),
+
+  /** Writes the shell's preferences. Resolves with { ok } | { ok, error }. */
+  savePrefs: (payload) => ipcRenderer.invoke('prefs-save', payload),
 
   /**
    * Resolves a dropped File to its absolute path.

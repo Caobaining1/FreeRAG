@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pipeline import parse_pdf  # noqa: E402
+from pipeline import parse_document  # noqa: E402
 
 try:
     import pymupdf
@@ -74,24 +74,24 @@ class PipelineTest(unittest.TestCase):
         cls._tmp.cleanup()
 
     def test_parses_pages_and_produces_chunks(self):
-        result = parse_pdf(self.pdf)
+        result = parse_document(self.pdf)
         self.assertEqual(result["page_count"], 2)
         self.assertEqual(result["pages_parsed"], 2)
         self.assertGreater(result["block_count"], 0)
         self.assertGreater(result["chunk_count"], 0)
         self.assertEqual(result["source_file"], "report.pdf")
 
-    def test_title_becomes_parent_section(self):
-        result = parse_pdf(self.pdf)
-        titles = [c for c in result["chunks"] if c["metadata"]["block_type"] == "Title"]
-        self.assertTrue(titles, "expected the large-font heading to be a Title block")
-        title = titles[0]["text"]
-        self.assertIn("Freerag Test Report", title)
-        following = [c for c in result["chunks"] if c["metadata"]["parent_section"] == title]
-        self.assertTrue(following, "body blocks should carry the heading as parent_section")
+    def test_heading_heads_a_section(self):
+        result = parse_document(self.pdf)
+        sections = [c for c in result["chunks"] if c["metadata"]["block_type"] == "Section"]
+        self.assertTrue(sections, "expected the large-font heading to head a Section chunk")
+        section = sections[0]
+        self.assertIn("Freerag Test Report", section["text"])
+        self.assertIn("first body paragraph", section["text"])
+        self.assertEqual(section["metadata"]["parent_section"], "Freerag Test Report")
 
     def test_table_is_detected_and_rendered_as_markdown(self):
-        result = parse_pdf(self.pdf)
+        result = parse_document(self.pdf)
         tables = [c for c in result["chunks"] if c["metadata"]["block_type"] == "Table"]
         self.assertTrue(tables, "expected the ruled table to be detected")
         text = tables[0]["text"]
@@ -100,29 +100,29 @@ class PipelineTest(unittest.TestCase):
         self.assertIn("r2c2", text)
 
     def test_table_cell_text_is_not_duplicated_as_body(self):
-        result = parse_pdf(self.pdf)
+        result = parse_document(self.pdf)
         body = [c for c in result["chunks"] if c["metadata"]["block_type"] == "Text"]
         for chunk in body:
             self.assertNotIn("r0c0", chunk["text"])
 
     def test_chunks_carry_page_numbers(self):
-        result = parse_pdf(self.pdf)
+        result = parse_document(self.pdf)
         pages = {c["metadata"]["page_num"] for c in result["chunks"]}
         self.assertEqual(pages, {1, 2})
 
     def test_max_pages_limits_work(self):
-        result = parse_pdf(self.pdf, max_pages=1)
+        result = parse_document(self.pdf, max_pages=1)
         self.assertEqual(result["pages_parsed"], 1)
         self.assertEqual({c["metadata"]["page_num"] for c in result["chunks"]}, {1})
 
     def test_chunk_ids_are_unique(self):
-        result = parse_pdf(self.pdf)
+        result = parse_document(self.pdf)
         ids = [c["chunk_id"] for c in result["chunks"]]
         self.assertEqual(len(ids), len(set(ids)))
 
     def test_missing_file_raises(self):
         with self.assertRaises(FileNotFoundError):
-            parse_pdf(os.path.join(self._tmp.name, "missing.pdf"))
+            parse_document(os.path.join(self._tmp.name, "missing.pdf"))
 
 
 if __name__ == "__main__":

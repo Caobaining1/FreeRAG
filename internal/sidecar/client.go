@@ -60,6 +60,9 @@ type Client struct {
 	closed   bool
 	closeErr error
 
+	// writeMu serialises request writes; see Call for why it is not c.mu.
+	writeMu sync.Mutex
+
 	done chan struct{}
 }
 
@@ -215,8 +218,23 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any, t
 	}
 	payload = append(payload, '\n')
 
-	if _, err := c.in.Write(payload); err != nil {
-		return fmt.Errorf("sidecar %s: write %s: %w", c.name, method, err)
+	// Serialised, and deliberately not under c.mu.
+	//
+	// A pipe write larger than PIPE_BUF can be split into several write(2)
+	// calls — 512 bytes on macOS, and a decide request carrying a 10k-character
+	// state is far past that — so two goroutines writing at once can interleave
+	// their halves and hand the sidecar's line parser a malformed request. It
+	// then answers with a parse error, which reads as "the decision failed"
+	// rather than as "two requests collided".
+	//
+	// A separate mutex from c.mu because a write can block on a full pipe, and
+	// the goroutine that would drain it is the reader, which needs c.mu to
+	// dispatch: holding c.mu here would let the two wait on each other.
+	c.writeMu.Lock()
+	_, writeErr := c.in.Write(payload)
+	c.writeMu.Unlock()
+	if writeErr != nil {
+		return fmt.Errorf("sidecar %s: write %s: %w", c.name, method, writeErr)
 	}
 
 	timer := time.NewTimer(timeout)

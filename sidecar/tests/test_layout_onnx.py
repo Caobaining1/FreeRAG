@@ -19,8 +19,13 @@ from layout_onnx import (  # noqa: E402
     PAD_VALUE,
     YOLO_LABELS,
     _covered_ratio,
+    _drop_contained,
+    default_providers,
     letterbox,
     postprocess,
+    reading_order,
+    reset_session_cache,
+    session_for,
 )
 
 
@@ -176,6 +181,209 @@ class PostprocessTest(unittest.TestCase):
     def test_clamps_reads_to_max_boxes(self):
         rows = [(0, i, 10, i + 5, 0.9, 1) for i in range(MAX_BOXES + 5)]
         self.assertLessEqual(len(postprocess(make_output(rows), IDENTITY_FACTOR)), MAX_BOXES)
+
+
+class ContainedBoxTest(unittest.TestCase):
+    """A box inside a larger box of its own type is one region found twice."""
+
+    @staticmethod
+    def block(x0, y0, x1, y1, name, score=0.9):
+        return {"block_type": name, "bbox": (float(x0), float(y0), float(x1), float(y1)),
+                "score": score}
+
+    def test_a_nested_box_of_the_same_type_is_dropped(self):
+        # The measured case: the small box scores higher, so the coverage rule
+        # claims it first and then keeps the large one too.
+        outer = self.block(64, 199, 549, 250, "Text", score=0.90)
+        inner = self.block(393, 199, 547, 261, "Text", score=0.93)
+        kept = _drop_contained([inner, outer])
+
+        self.assertEqual([d["bbox"] for d in kept], [outer["bbox"]])
+
+    def test_a_nested_box_of_another_type_is_kept(self):
+        # A caption inside the figure it labels is not a duplicate.
+        figure = self.block(50, 50, 500, 400, "Figure")
+        caption = self.block(60, 60, 480, 90, "Caption")
+        self.assertEqual(len(_drop_contained([figure, caption])), 2)
+
+    def test_a_partly_overlapping_box_is_kept(self):
+        # Half-covered is two regions touching, not one inside the other.
+        left = self.block(0, 0, 100, 100, "Text")
+        right = self.block(50, 0, 150, 100, "Text")
+        self.assertEqual(len(_drop_contained([left, right])), 2)
+
+
+class ProviderChoiceTest(unittest.TestCase):
+    """Which execution provider the models run on (FREERAG_ONNX_PROVIDERS)."""
+
+    def setUp(self):
+        self.saved = os.environ.get('FREERAG_ONNX_PROVIDERS')
+
+    def tearDown(self):
+        if self.saved is None:
+            os.environ.pop('FREERAG_ONNX_PROVIDERS', None)
+        else:
+            os.environ['FREERAG_ONNX_PROVIDERS'] = self.saved
+
+    def test_cpu_is_the_default(self):
+        os.environ.pop('FREERAG_ONNX_PROVIDERS', None)
+        self.assertEqual(default_providers(), ['CPUExecutionProvider'])
+
+    def test_auto_puts_cpu_last_so_inference_still_has_somewhere_to_run(self):
+        os.environ['FREERAG_ONNX_PROVIDERS'] = 'auto'
+        providers = default_providers()
+        self.assertEqual(providers[-1], 'CPUExecutionProvider')
+        self.assertTrue(providers)
+
+    def test_an_explicit_list_is_honoured_in_order(self):
+        os.environ['FREERAG_ONNX_PROVIDERS'] = 'CPUExecutionProvider'
+        self.assertEqual(default_providers(), ['CPUExecutionProvider'])
+
+    def test_an_unavailable_provider_still_leaves_cpu(self):
+        os.environ['FREERAG_ONNX_PROVIDERS'] = 'NoSuchExecutionProvider'
+        self.assertEqual(default_providers(), ['CPUExecutionProvider'])
+
+    def test_an_empty_setting_falls_back_to_cpu(self):
+        os.environ['FREERAG_ONNX_PROVIDERS'] = '   '
+        self.assertEqual(default_providers(), ['CPUExecutionProvider'])
+
+
+class SessionCacheTest(unittest.TestCase):
+    """A session is built once per process, not once per document.
+
+    Regression guard for the 6.9s CoreML compile that used to be paid for every
+    document (docs/plan.md §5.4): 60 corpus documents spent 414s of 505s
+    re-compiling the same model. The build callable stands in for
+    onnxruntime.InferenceSession so this runs without a model file.
+    """
+
+    def setUp(self):
+        reset_session_cache()
+
+    def tearDown(self):
+        reset_session_cache()
+
+    def test_one_configuration_is_built_once_and_shared(self):
+        builds = []
+
+        def build():
+            builds.append(1)
+            return object()
+
+        first = session_for('layout.onnx', ['CPUExecutionProvider'], 1, build=build)
+        again = session_for('layout.onnx', ['CPUExecutionProvider'], 1, build=build)
+
+        self.assertEqual(len(builds), 1, 'the session was built more than once')
+        self.assertIs(first, again)
+
+    def test_a_different_configuration_gets_its_own_session(self):
+        # Each of these changes what gets compiled, so sharing would be wrong.
+        keys = [
+            ('layout.onnx', ['CPUExecutionProvider'], 1),
+            ('layout.onnx', ['CPUExecutionProvider'], 2),
+            ('layout.onnx', ['CoreMLExecutionProvider', 'CPUExecutionProvider'], 1),
+            ('table.onnx', ['CPUExecutionProvider'], 1),
+        ]
+        sessions = [session_for(path, providers, threads, build=object) for path, providers, threads in keys]
+        self.assertEqual(len({id(s) for s in sessions}), len(keys))
+
+    def test_the_provider_order_is_part_of_the_key(self):
+        # [A, B] and [B, A] run inference on different hardware.
+        one = session_for('m.onnx', ['CoreMLExecutionProvider', 'CPUExecutionProvider'], 1, build=object)
+        two = session_for('m.onnx', ['CPUExecutionProvider', 'CoreMLExecutionProvider'], 1, build=object)
+        self.assertIsNot(one, two)
+
+    def test_concurrent_callers_build_it_once(self):
+        # The lock is the whole point: an unlocked cache would compile the model
+        # once per thread, which is exactly the waste this replaced.
+        import threading
+        import time
+
+        builds = []
+
+        def slow_build():
+            time.sleep(0.05)
+            builds.append(1)
+            return object()
+
+        barrier = threading.Barrier(8)
+        results = []
+
+        def worker():
+            barrier.wait()
+            results.append(session_for('m.onnx', ['CPUExecutionProvider'], 1, build=slow_build))
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(builds), 1, 'built %d times across 8 threads' % len(builds))
+        self.assertEqual(len({id(s) for s in results}), 1)
+
+
+class ReadingOrderTest(unittest.TestCase):
+    """XY-cut ordering, tested without a model (see layout_onnx.reading_order)."""
+
+    @staticmethod
+    def block(x0, y0, x1, y1, name):
+        return {"block_type": name, "bbox": (float(x0), float(y0), float(x1), float(y1))}
+
+    def names(self, detections):
+        return [d["block_type"] for d in detections]
+
+    def test_two_columns_are_read_column_by_column(self):
+        # Left and right column each hold two stacked paragraphs. A (y, x) sort
+        # would give L1, R1, L2, R2 — the interleaving that merged the columns.
+        detections = [
+            self.block(0, 0, 100, 50, "L1"),
+            self.block(150, 0, 250, 50, "R1"),
+            self.block(0, 70, 100, 120, "L2"),
+            self.block(150, 70, 250, 120, "R2"),
+        ]
+        self.assertEqual(self.names(reading_order(detections)), ["L1", "L2", "R1", "R2"])
+
+    def test_a_full_width_heading_stays_above_both_columns(self):
+        # The heading spans the gutter, so no vertical cut is possible until it
+        # has been split off — this is what keeps it first.
+        detections = [
+            self.block(0, 0, 250, 40, "H"),
+            self.block(0, 60, 100, 110, "L1"),
+            self.block(150, 60, 250, 110, "R1"),
+            self.block(0, 130, 100, 180, "L2"),
+            self.block(150, 130, 250, 180, "R2"),
+        ]
+        self.assertEqual(
+            self.names(reading_order(detections)), ["H", "L1", "L2", "R1", "R2"]
+        )
+
+    def test_single_column_keeps_top_to_bottom_order(self):
+        detections = [
+            self.block(0, 200, 300, 260, "third"),
+            self.block(0, 0, 300, 60, "first"),
+            self.block(0, 100, 300, 160, "second"),
+        ]
+        self.assertEqual(
+            self.names(reading_order(detections)), ["first", "second", "third"]
+        )
+
+    def test_a_sub_threshold_gap_is_not_a_column_break(self):
+        # 2 pt apart is line spacing, not a gutter: the left block stays first.
+        detections = [
+            self.block(102, 0, 200, 50, "right"),
+            self.block(0, 0, 100, 50, "left"),
+        ]
+        self.assertEqual(self.names(reading_order(detections)), ["left", "right"])
+
+    def test_rows_separated_by_a_wide_band_read_top_to_bottom(self):
+        detections = [
+            self.block(400, 300, 500, 360, "high-right"),
+            self.block(0, 0, 200, 100, "low-left"),
+        ]
+        self.assertEqual(
+            self.names(reading_order(detections)), ["low-left", "high-right"]
+        )
 
 
 class LabelMappingTest(unittest.TestCase):

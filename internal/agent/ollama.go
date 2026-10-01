@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,7 +21,7 @@ const DefaultGeneratorModel = "freerag-qwen3"
 
 // reThinkBlock matches a complete reasoning block. Qwen3 answers in thinking
 // mode by default; the loop's prompt asks for a short cited answer, so the
-// reasoning must not leak into the draft the checker reviews.
+// reasoning must not leak into the answer the checker reviews.
 var reThinkBlock = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 // OllamaModel implements Model against a local Ollama server, which runs the
@@ -66,6 +67,83 @@ type OllamaModel struct {
 	HTTP *http.Client
 }
 
+// CaptionImage asks a vision model to describe one image and returns its text.
+//
+// Separate from Complete for two reasons: the vision model is a different model
+// than the loop's generator (which is text-only), and this call must not stream —
+// the description is rewritten (numbers stripped, see vision.go) before it
+// reaches the index, so a half-streamed caption would be unusable.
+//
+// maxTokens bounds generation, and it is the only lever that touches the
+// dominant cost. Measured on the reference machine (Apple M5, qwen2.5vl:3b, Q4,
+// 100% on Metal, image encoding ALSO on Metal — clip_ctx: MTL0 backend):
+//
+//	image + prompt prefill: 1230 tok in 15.1s (82 tok/s), 0.1s when the same
+//	                        image is re-sent (prompt cache hit)
+//	generation:             155 tok in 17.5s (8.8 tok/s)
+//
+// So ~8.8 tok/s is the wall, the same environment-bound rate the text model hits,
+// and 155 tokens is what this model actually writes for a figure.
+func (m *OllamaModel) CaptionImage(
+	ctx context.Context, model, prompt, imageB64 string, maxTokens int,
+) (string, error) {
+	if model == "" {
+		return "", fmt.Errorf("ollama: no vision model configured")
+	}
+
+	options := map[string]any{
+		// Deterministic: the same figure must caption to the same text, or the
+		// index is not reproducible and a rebuild silently changes answers.
+		"temperature": 0,
+		"seed":        7,
+	}
+	if maxTokens > 0 {
+		options["num_predict"] = maxTokens
+	}
+
+	payload, err := json.Marshal(ollamaChatRequest{
+		Model: model,
+		Messages: []ollamaMessage{{
+			Role:    string(RoleUser),
+			Content: prompt,
+			Images:  []string{imageB64},
+		}},
+		Stream:    false,
+		Options:   options,
+		KeepAlive: m.KeepAlive,
+	})
+	if err != nil {
+		return "", fmt.Errorf("ollama: marshal caption request: %w", err)
+	}
+
+	endpoint := m.baseURL() + "/api/chat"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("ollama: build caption request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := m.client().Do(request)
+	if err != nil {
+		return "", fmt.Errorf("ollama: caption %s: %w", endpoint, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return "", fmt.Errorf("ollama: HTTP %d: %s", response.StatusCode, truncateRunes(string(body), 200))
+	}
+
+	var decoded ollamaChatResponse
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8<<20)).Decode(&decoded); err != nil {
+		return "", fmt.Errorf("ollama: decode caption: %w", err)
+	}
+	if decoded.Error != "" {
+		return "", fmt.Errorf("ollama: %s", decoded.Error)
+	}
+	return strings.TrimSpace(decoded.Message.Content), nil
+}
+
 func (m *OllamaModel) baseURL() string {
 	if m.BaseURL == "" {
 		return DefaultOllamaURL
@@ -88,6 +166,9 @@ type ollamaMessage struct {
 	Role      string           `json:"role"`
 	Content   string           `json:"content"`
 	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+	// Images are base64 PNG/JPEG payloads, which is what Ollama's chat API
+	// accepts inline. Only the figure captioner sends them.
+	Images []string `json:"images,omitempty"`
 }
 
 // ollamaTool is the wire form of a tool the model may call (OpenAI-compatible,
@@ -126,9 +207,15 @@ type ollamaChatRequest struct {
 	KeepAlive string          `json:"keep_alive,omitempty"`
 }
 
+// ollamaChatResponse is one object from /api/chat.
+//
+// The same struct covers a streamed reply and a non-streamed one: streaming
+// sends a sequence of these, non-streaming sends exactly one. `done` is only
+// meaningful while streaming.
 type ollamaChatResponse struct {
 	Message ollamaMessage `json:"message"`
 	Error   string        `json:"error"`
+	Done    bool          `json:"done"`
 }
 
 // decodeArguments accepts either an object or a JSON-encoded string of one.
@@ -180,6 +267,34 @@ func wireTools(specs []ToolSpec) []ollamaTool {
 // them: it owns the budget and the fallback, so a model that asks for nothing
 // useful still leaves a working pipeline behind.
 func (m *OllamaModel) Complete(ctx context.Context, messages []Message, tools []ToolSpec) (*Reply, error) {
+	return m.complete(ctx, messages, tools, false, nil)
+}
+
+// CompleteStream implements StreamingModel: Complete, with the answer reported
+// as it is written.
+//
+// onDelta receives successive pieces of answer text, in order, and may be nil.
+// The Reply is the same value Complete would have returned, so a caller can
+// ignore the deltas entirely and still be correct.
+//
+// It exists for the UI. A detailed answer takes tens of seconds to generate, and
+// the loop has nothing else to report during that window — the answer is produced
+// after the tools and before the checker, so without this the window is silent.
+func (m *OllamaModel) CompleteStream(
+	ctx context.Context, messages []Message, tools []ToolSpec, onDelta func(string),
+) (*Reply, error) {
+	return m.complete(ctx, messages, tools, true, onDelta)
+}
+
+// complete performs one chat call, streamed or not.
+//
+// Both shapes are read with the same json.Decoder, because a streamed reply is a
+// sequence of objects and a non-streamed one is a sequence of exactly one — so
+// the loop does not need to know which it is. Streaming only adds the deltas;
+// the assembled Reply is identical either way.
+func (m *OllamaModel) complete(
+	ctx context.Context, messages []Message, tools []ToolSpec, stream bool, onDelta func(string),
+) (*Reply, error) {
 	if m.Model == "" {
 		return nil, fmt.Errorf("ollama: no model configured")
 	}
@@ -203,7 +318,7 @@ func (m *OllamaModel) Complete(ctx context.Context, messages []Message, tools []
 	payload, err := json.Marshal(ollamaChatRequest{
 		Model:     m.Model,
 		Messages:  wire,
-		Stream:    false,
+		Stream:    stream,
 		Options:   options,
 		Tools:     wireTools(tools),
 		Think:     m.Think,
@@ -226,37 +341,82 @@ func (m *OllamaModel) Complete(ctx context.Context, messages []Message, tools []
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("ollama: read response: %w", err)
-	}
 	if response.StatusCode != http.StatusOK {
+		// Read a little of the body for the message: an error response is small
+		// and has already been fully sent, unlike the success path.
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
 		return nil, fmt.Errorf("ollama: HTTP %d: %s", response.StatusCode, truncateRunes(string(body), 200))
 	}
 
-	var decoded ollamaChatResponse
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		return nil, fmt.Errorf("ollama: decode response: %w", err)
-	}
-	if decoded.Error != "" {
-		return nil, fmt.Errorf("ollama: %s", decoded.Error)
+	var (
+		content strings.Builder
+		calls   []ToolCall
+		filter  thinkFilter
+	)
+	// The ceiling is a safety net rather than a limit on the answer: num_predict
+	// already bounds generation, and this only stops a misbehaving server from
+	// filling memory.
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<20))
+
+	for {
+		var chunk ollamaChatResponse
+		if err := decoder.Decode(&chunk); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("ollama: decode response: %w", err)
+		}
+		if chunk.Error != "" {
+			return nil, fmt.Errorf("ollama: %s", chunk.Error)
+		}
+
+		content.WriteString(chunk.Message.Content)
+		if onDelta != nil {
+			if text := filter.write(chunk.Message.Content); text != "" {
+				onDelta(text)
+			}
+		}
+		calls = append(calls, decodeToolCalls(chunk.Message.ToolCalls)...)
+
+		if stream && chunk.Done {
+			// Returned on the done marker rather than at EOF so a server that
+			// keeps the connection open does not stall the caller.
+			break
+		}
 	}
 
-	reply := &Reply{Content: StripThink(decoded.Message.Content)}
-	for _, call := range decoded.Message.ToolCalls {
+	// Flushed after the loop so the characters the filter was holding back are
+	// not silently dropped at the end of the answer.
+	if onDelta != nil {
+		if text := filter.flush(); text != "" {
+			onDelta(text)
+		}
+	}
+
+	// StripThink still runs over the whole reply. The filter above already keeps
+	// reasoning out of the deltas, but the Reply is what the checker reads, and
+	// it must not depend on the filter having seen every byte.
+	return &Reply{Content: StripThink(content.String()), ToolCalls: calls}, nil
+}
+
+// decodeToolCalls drops calls the loop could never dispatch.
+//
+// A call with no function name has nothing to resolve it against; keeping it
+// would put a trace line in the result for a tool that was never executable.
+func decodeToolCalls(raw []ollamaToolCall) []ToolCall {
+	out := make([]ToolCall, 0, len(raw))
+	for _, call := range raw {
 		name := strings.TrimSpace(call.Function.Name)
 		if name == "" {
-			// A nameless call cannot be dispatched; dropping it here keeps the
-			// trace free of a call that was never executable.
 			continue
 		}
-		reply.ToolCalls = append(reply.ToolCalls, ToolCall{
+		out = append(out, ToolCall{
 			ID:        call.ID,
 			Name:      name,
 			Arguments: decodeArguments(call.Function.Arguments),
 		})
 	}
-	return reply, nil
+	return out
 }
 
 // Reachable reports whether an Ollama server answers and the model is present.
@@ -304,4 +464,146 @@ func StripThink(text string) string {
 		text = text[:index]
 	}
 	return strings.TrimSpace(text)
+}
+
+// UnloadModel asks Ollama to evict a model from memory now.
+//
+// Called when an index job ends. The parse-time vision model (sidecar/vlm.py)
+// is ~3.5 GB resident and nothing on the query path uses it, so holding it after
+// the run is pure waste on a machine where memory is the binding constraint.
+// `keep_alive: 0` is Ollama's documented unload.
+//
+// A failure is returned for the caller to log and nothing more: the model
+// expires on its own keep-alive regardless, and failing an index run because a
+// courtesy unload did not land would be absurd. An empty model is a no-op, which
+// is what "vision is off" looks like.
+func UnloadModel(ctx context.Context, baseURL, model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = DefaultOllamaURL
+	}
+
+	payload, err := json.Marshal(map[string]any{"model": model, "keep_alive": 0})
+	if err != nil {
+		return fmt.Errorf("ollama: marshal unload: %w", err)
+	}
+	endpoint := strings.TrimRight(baseURL, "/") + "/api/generate"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("ollama: build unload: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+
+	response, err := (&http.Client{Timeout: 60 * time.Second}).Do(request)
+	if err != nil {
+		return fmt.Errorf("ollama: unload %s: %w", model, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return fmt.Errorf("ollama: unload HTTP %d: %s",
+			response.StatusCode, truncateRunes(string(body), 200))
+	}
+	return nil
+}
+
+// Reasoning markers, as they appear inline in a reply.
+const (
+	thinkOpen  = "<think>"
+	thinkClose = "</think>"
+)
+
+// thinkFilter removes reasoning blocks from a token stream.
+//
+// StripThink cannot be reused per delta, and that is the whole reason this type
+// exists: Ollama splits text on its own boundaries, so "<thi" and "nk>let me
+// think" arrive as separate chunks and a per-chunk regex matches neither. The
+// reasoning would be typed out to the user ahead of the answer — the exact thing
+// StripThink exists to prevent.
+//
+// So a few trailing characters are held back whenever they could still turn into
+// a tag. The cost is one sub-word of latency at each chunk boundary and nothing
+// else: held text is emitted as soon as it is known not to be a tag.
+type thinkFilter struct {
+	// held is the tail not yet safe to emit.
+	held string
+	// inside is true between an opening tag and its closing tag.
+	inside bool
+}
+
+// write consumes one delta and returns the part of it that is safe to show.
+func (f *thinkFilter) write(chunk string) string {
+	f.held += chunk
+	var out strings.Builder
+
+	for {
+		if f.inside {
+			end := strings.Index(f.held, thinkClose)
+			if end < 0 {
+				// Still reasoning. Only the tail could be the closing tag.
+				f.held = trailingBytes(f.held, len(thinkClose)-1)
+				return out.String()
+			}
+			f.held = f.held[end+len(thinkClose):]
+			f.inside = false
+			continue
+		}
+
+		if start := strings.Index(f.held, thinkOpen); start >= 0 {
+			out.WriteString(f.held[:start])
+			f.held = f.held[start+len(thinkOpen):]
+			f.inside = true
+			continue
+		}
+
+		// No complete opening tag. Emit everything except a suffix that could
+		// still become one.
+		safe := len(f.held) - ambiguousTail(f.held)
+		out.WriteString(f.held[:safe])
+		f.held = f.held[safe:]
+		return out.String()
+	}
+}
+
+// flush returns whatever write is still holding back.
+//
+// Text inside an unterminated reasoning block is dropped rather than shown,
+// which matches StripThink: a model that ran out of budget mid-thought produced
+// no answer, and half a thought is worse than nothing.
+func (f *thinkFilter) flush() string {
+	held := ""
+	if !f.inside {
+		held = f.held
+	}
+	f.held = ""
+	return held
+}
+
+// ambiguousTail reports how many trailing bytes could be the start of a tag.
+//
+// This is what makes the filter correct across chunk boundaries without holding
+// back the whole stream: ordinary text reports 0, and only a genuine partial tag
+// is delayed.
+func ambiguousTail(s string) int {
+	limit := len(thinkOpen) - 1
+	if limit > len(s) {
+		limit = len(s)
+	}
+	for n := limit; n > 0; n-- {
+		if strings.HasPrefix(thinkOpen, s[len(s)-n:]) {
+			return n
+		}
+	}
+	return 0
+}
+
+// trailingBytes returns the last n bytes of s.
+func trailingBytes(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	return s[len(s)-n:]
 }

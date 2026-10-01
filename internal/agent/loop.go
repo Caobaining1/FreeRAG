@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	"freerag/internal/store"
 )
@@ -19,17 +20,32 @@ type Spec struct {
 	ActionMaxTurns   int
 	SnippetsPerQuery int
 	Tools            []string
+	// AnswerLanguage forces the language the answer is written in: "zh", "en",
+	// or "" to follow the question. A setting rather than a property of the
+	// prompt, because a user asking a Chinese question of an English corpus
+	// wants the answer in the language they asked in — and one asking in
+	// English about Chinese sources wants the same.
+	AnswerLanguage string
 }
 
 // Medium is the medium-mode spec: agentic with SCA review, but no planner and
 // no prefetch fan-out (docs/plan.md §6.2).
 func Medium() Spec {
 	return Spec{
-		Label:            "medium",
-		EnableSCA:        true,
-		SCAMaxRounds:     3,
-		UseFanout:        false,
-		ActionMaxTurns:   8,
+		Label:        "medium",
+		EnableSCA:    true,
+		SCAMaxRounds: 3,
+		UseFanout:    false,
+		// A per-TURN allowance, not a run total: the planner is asked to issue
+		// every independent call in one turn (see toolPlanSystemPrompt), because
+		// the calls inside a turn are independent and running five costs the same
+		// as running one. RAGFlow's tool agents do the same — several tool calls
+		// per step, bounded by an explicit round count — and its `max_rounds` is
+		// the counterpart of SCAMaxRounds here. 12 leaves room for a multi-part
+		// question (a search per part, a grep per identifier) without letting a
+		// single turn pull in so much evidence that the answer prompt stops
+		// fitting; the ceiling that matters is still SCAMaxRounds × this.
+		ActionMaxTurns:   12,
 		SnippetsPerQuery: 6,
 		// The four retrieval tools of §6.7: nothing that needs a compiled
 		// structure (no navigate_*, no graph_explore) and no web search.
@@ -37,18 +53,24 @@ func Medium() Spec {
 	}
 }
 
-// DefaultMaxDraftChars caps the draft handed to the checker.
-const DefaultMaxDraftChars = 6000
+// DefaultExtractiveAnswerChars caps the answer handed to the checker.
+const DefaultExtractiveAnswerChars = 6000
 
 // DefaultContextTokens is the context window the kernel asks the generator for.
 //
 // docs/plan.md §5 budgets 4K–8K; the top of that range is the useful default
-// because the draft prompt carries the evidence block.
+// because the answer prompt carries the evidence block.
 const DefaultContextTokens = 8192
 
-// draftPromptReserveTokens covers the system prompt, the question, and the room
+// answerPromptReserveTokens covers the system prompt, the question, and the room
 // the answer itself needs.
-const draftPromptReserveTokens = 768
+//
+// Raised from 768 when the answer prompt started asking for a thorough answer:
+// the reserve has to hold the answer, and the generator's num_predict is what
+// bounds it. Reserving less than the answer can grow to does not truncate the
+// answer — it overflows the window, and Ollama rejects an oversized prompt with
+// HTTP 400 rather than trimming it.
+const answerPromptReserveTokens = 1280
 
 // charsPerToken converts tokens to characters for the prompt budget.
 //
@@ -64,7 +86,7 @@ func PromptCharBudget(contextTokens int) int {
 	if contextTokens <= 0 {
 		contextTokens = DefaultContextTokens
 	}
-	usable := contextTokens - draftPromptReserveTokens
+	usable := contextTokens - answerPromptReserveTokens
 	if usable < 512 {
 		usable = 512
 	}
@@ -76,12 +98,37 @@ type Result struct {
 	Question string      `json:"question"`
 	Mode     string      `json:"mode"`
 	Rounds   int         `json:"rounds"`
-	Draft    string      `json:"draft"`
+	Answer   string      `json:"answer"`
 	Verdict  Verdict     `json:"verdict"`
 	Missing  []string    `json:"missing,omitempty"`
 	Evidence []store.Hit `json:"evidence"`
 	Queries  []string    `json:"queries"`
-	Trace    []string    `json:"trace"`
+	// Route records the flow's simple/complex classification. Empty when the
+	// loop was run directly (no flow), which is what the tests and the
+	// deterministic `ask` path do.
+	Route Route `json:"route,omitempty"`
+	// SubQuestions is non-empty only on the complex path: it is the decompose
+	// result the sub-loops were run over, kept so the run can be explained.
+	SubQuestions []string `json:"sub_questions,omitempty"`
+	// NotSufficient names the sub-questions that never reached SUFFICIENT on
+	// their own pool. Only the complex path fills it: there, Verdict is SUFFICIENT
+	// iff this is empty, and each sub-question was judged on its own evidence
+	// rather than on the merged pool (see Flow.fanoutNode).
+	NotSufficient []string `json:"not_sufficient,omitempty"`
+	// Enumeration reports that the rewrite declared the answer to be a SET of
+	// named elements, which switches the run to the enumeration strategy
+	// (see coverage.go). ItemKind is what the elements are, and Members are the
+	// ones the run could anchor to a passage.
+	Enumeration bool     `json:"enumeration,omitempty"`
+	ItemKind    string   `json:"item_kind,omitempty"`
+	Members     []Member `json:"members,omitempty"`
+	// MetadataScope is the document set a metadata_search narrowed this run to,
+	// empty when no filter was applied, and MetadataFilter is that filter in the
+	// words the model used. Both are reported because a narrow search that found
+	// nothing is not the same statement as a corpus that has nothing.
+	MetadataScope  []string `json:"metadata_scope,omitempty"`
+	MetadataFilter string   `json:"metadata_filter,omitempty"`
+	Trace          []string `json:"trace"`
 }
 
 // EvidenceIDs returns the chunk identities behind the answer, for citations.
@@ -95,7 +142,7 @@ func (r *Result) EvidenceIDs() []string {
 
 // Loop is the medium-mode research loop.
 //
-// Model may be nil: without a generating model the loop still runs, drafting
+// Model may be nil: without a generating model the loop still runs, answering
 // extractively and rewriting from the checker's missing terms. That keeps the
 // graph exercised in tests and in a model-less desktop install.
 type Loop struct {
@@ -105,11 +152,16 @@ type Loop struct {
 	Tools   *Toolbox
 	Model   Model
 	Checker Checker
+	// Chooser decides the next retrieval step each round. When set it takes
+	// precedence over Model's tool planning: Laya scores a deterministic
+	// candidate set in ~100 ms, where the planning model call costs tens of
+	// seconds and can name values the index does not hold.
+	Chooser ToolChooser
 	Spec    Spec
 	Logger  *log.Logger
 
-	// MaxDraftChars caps the draft; <=0 selects DefaultMaxDraftChars.
-	MaxDraftChars int
+	// ExtractiveAnswerChars caps the answer; <=0 selects DefaultExtractiveAnswerChars.
+	ExtractiveAnswerChars int
 	// MaxPromptChars caps the evidence block sent to the model; <=0 selects
 	// PromptCharBudget(DefaultContextTokens). Keep it consistent with the
 	// generator's context window — an oversized prompt is rejected, not
@@ -123,6 +175,20 @@ type Loop struct {
 	// indistinguishable from a hang, and this is the only signal that changes
 	// during a round.
 	OnStep func(line string)
+
+	// OnAnswerDelta, when set, receives the final answer as it is written.
+	//
+	// Kept separate from OnStep because it carries the answer itself rather than
+	// a trace line, and the two are rendered differently: trace lines go to a
+	// log, this goes where the answer will appear.
+	//
+	// ONLY the answer is reported here, and it is the only text the loop asks a
+	// model to write: the per-round draft the checker used to review is gone (see
+	// kbinfo). So a caller receives exactly one text per question, that text is
+	// the one in Result.Answer, and it is never replaced — which is what lets a
+	// renderer append fragments without having to ask whether it is showing
+	// something that will be retracted.
+	OnAnswerDelta func(delta string)
 }
 
 // step appends one trace line and reports it when OnStep is wired.
@@ -157,11 +223,11 @@ func (l *Loop) logf(format string, args ...any) {
 	}
 }
 
-func (l *Loop) maxDraftChars() int {
-	if l.MaxDraftChars > 0 {
-		return l.MaxDraftChars
+func (l *Loop) maxExtractiveAnswerChars() int {
+	if l.ExtractiveAnswerChars > 0 {
+		return l.ExtractiveAnswerChars
 	}
-	return DefaultMaxDraftChars
+	return DefaultExtractiveAnswerChars
 }
 
 func (l *Loop) maxPromptChars() int {
@@ -171,9 +237,33 @@ func (l *Loop) maxPromptChars() int {
 	return PromptCharBudget(DefaultContextTokens)
 }
 
-// Run executes the loop: gather evidence, draft, check, and rewrite while the
-// verdict stays unsatisfied and rounds remain.
+// Run executes the loop and writes the answer: gather evidence, check, rewrite
+// while the verdict stays unsatisfied and rounds remain, then write ONE answer
+// from the pool that was gathered. The half that writes nothing is
+// RunRetrieval.
 func (l *Loop) Run(ctx context.Context, question string) (*Result, error) {
+	result, err := l.RunRetrieval(ctx, question)
+	if err != nil {
+		// A cancelled or failed run returns its partial result with no answer
+		// written, which is the behaviour the loop has always had.
+		return result, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("agent: loop produced no result")
+	}
+	l.writeAnswer(ctx, question, result)
+	return result, nil
+}
+
+// RunRetrieval gathers evidence and judges it, and writes nothing.
+//
+// This is the complex path's entry point. A sub-question exists to be SEARCHED
+// and judged, and the single answer is written once by the synthesis from the
+// merged pool — so a sub-loop having its own answer written was N full
+// generations whose only reader was the synthesis prompt. Measured on the
+// reference machine an answer costs about a minute (6.4 tok/s), which made this
+// the largest avoidable cost on the complex path.
+func (l *Loop) RunRetrieval(ctx context.Context, question string) (*Result, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return nil, fmt.Errorf("agent: question is required")
@@ -190,36 +280,107 @@ func (l *Loop) Run(ctx context.Context, question string) (*Result, error) {
 		spec.SCAMaxRounds = 1
 	}
 
-	queries := []string{question}
-	seen := map[string]bool{}
+	// Round 1 searches the REWRITTEN queries, never the question as asked (see
+	// RewriteQueries). The question stays the question for everything else — the
+	// checker, the answer prompt, and the rewrite that follows a reported gap —
+	// because those are about meaning rather than about matching an index.
+	plan := l.searchPlan(ctx, question, &result.Trace)
+	queries := plan.Queries
+	// Enumeration. The gate reads the DECLARATION (a set-shaped slot with an
+	// element kind and the deed's words) and never the question's wording, so a
+	// question that merely looks like a list pays nothing for this.
+	coverage := CoverageOf(plan.Slots)
+	rounds := spec.SCAMaxRounds
+	if coverage.Ok() {
+		queries, rounds = l.enterEnumeration(coverage, queries, rounds, &result.Trace)
+		result.Enumeration, result.ItemKind = true, coverage.ItemKind
+	}
+	// Everything retrieval returns accumulates here, and this is what the
+	// sufficiency decision reads (see kbinfo).
+	info := newKBInfo()
 	var missing []string
+	// Every call this run has already made, with what it returned. The planner
+	// system prompt has always said "do not repeat a call that was already
+	// made", but the prompt never said WHICH calls those were — an omission that
+	// only bites when the evidence pool is empty, because then there is nothing
+	// else in the prompt to steer by either.
+	var attempts []attempt
 
-	for round := 1; round <= spec.SCAMaxRounds; round++ {
+	// Round 1's calls, when the declaration passed the gate: one recall per
+	// operand, all of them in this one turn. Built here rather than through
+	// planTools because the operand list IS the declaration — it is not a decision,
+	// and RAGFlow issues the whole recall list itself (see OperandCalls).
+	var enumerationCalls []ToolCall
+	if coverage.Ok() {
+		enumerationCalls = OperandCalls(coverage.Operands(), spec.ActionMaxTurns)
+	}
+
+	for round := 1; round <= rounds; round++ {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		result.Rounds = round
 		result.Queries = queries
 
-		calls := l.planTools(ctx, question, queries, missing, result.Evidence, &result.Trace)
-		added := l.runTools(ctx, calls, &result.Evidence, seen, &result.Trace)
+		var calls []ToolCall
+		switch {
+		case round == 1 && len(enumerationCalls) > 0:
+			l.step(&result.Trace, fmt.Sprintf(
+				"[Enumerate] recalling all %d operand(s) in this turn.", len(enumerationCalls)))
+			calls = enumerationCalls
+		default:
+			calls = l.planTools(ctx, question, queries, missing, info.pool(), attempts, &result.Trace)
+		}
+		added := l.runTools(ctx, calls, info, &result.Trace, &attempts)
 		l.step(&result.Trace, fmt.Sprintf(
-			"[RAGAgent] Round %d: +%d passage(s); pool now %d.",
-			round, added, len(result.Evidence)))
+			"[RAGAgent] Round %d: +%d passage(s); kbinfo now holds %d.",
+			round, added, info.len()))
 
-		result.Draft = l.draft(ctx, question, result.Evidence)
+		// No answer is written, in any round.
+		//
+		// The loop used to generate one per round so the checker had something
+		// to judge: a full generation — measured at 60 s on the reference
+		// machine — whose only reader was that decision, and which the user
+		// never saw, because the published text is written once at the end by
+		// answer. The checker now reads kbinfo, so the answer had no reader left.
+		empty := info.empty()
 
-		verdict, gaps := checker.Check(ctx, question, result.Draft, result.Evidence)
+		// An empty pool is never sufficient. The guard stays even though the
+		// checker now reads the pool itself, because the failure it prevents was
+		// measured, not imagined.
+		//
+		// Back when the checker judged a answer, a first tool call that matched
+		// nothing produced the answer "the evidence does not answer this", which
+		// Laya scored SUFFICIENT at 0.93 — correctly, since that answer does
+		// answer the question it was asked. Nothing asked whether the corpus had
+		// been looked at.
+		//
+		// Asking about the pool makes sufficiency much harder to mistake, but
+		// "much harder" is not an invariant. Without this the loop can return
+		// after one round holding zero passages, and the answer reads as a
+		// finding about the corpus ("there are no papers by this author") when it
+		// is a report of a lookup that never happened.
+		var (
+			verdict Verdict
+			gaps    []string
+		)
+		if empty {
+			verdict, gaps = VerdictInsufficient, uniqueTerms(question)
+			l.step(&result.Trace, fmt.Sprintf(
+				"[SCA] Round %d verdict=INSUFFICIENT (no evidence to judge; the checker is not asked).", round))
+		} else {
+			verdict, gaps = checker.Check(ctx, question, info)
+			l.step(&result.Trace, fmt.Sprintf(
+				"[SCA] Round %d verdict=%s (missing=%d).", round, verdict, len(gaps)))
+		}
 		result.Verdict = verdict
 		result.Missing = gaps
 		missing = gaps
-		l.step(&result.Trace, fmt.Sprintf(
-			"[SCA] Round %d verdict=%s (missing=%d).", round, verdict, len(gaps)))
 
 		if verdict == VerdictSufficient {
-			return result, nil
+			break
 		}
-		if round == spec.SCAMaxRounds {
+		if round == rounds {
 			break
 		}
 
@@ -231,7 +392,101 @@ func (l *Loop) Run(ctx context.Context, question string) (*Result, error) {
 		queries = next
 	}
 
+	result.Evidence = info.pool()
+	// The enumeration's members are resolved once, over the pool the run settled
+	// on. RAGFlow resolves coverage in its formalize-answer node for the same
+	// reason: a member list is a reading of the FINAL evidence, not of evidence a
+	// later round may supersede.
+	if coverage.Ok() && len(result.Evidence) > 0 {
+		result.Members = l.extractMembers(ctx, question, result.Evidence, &result.Trace)
+	}
+	// The scope travels on the result for two reasons: the answer prompt has to
+	// say that the search was narrowed (a "not found" inside a filter is not a
+	// statement about the corpus), and the reply has to show what the run was
+	// limited to.
+	result.MetadataScope = info.scopeIDs()
+	result.MetadataFilter = info.scopeNote
 	return result, nil
+}
+
+// writeAnswer is the only place a loop asks a model to write the answer.
+//
+// It used to be the tail of Run, which meant every sub-loop on the complex path
+// wrote one too (see RunRetrieval). There is no per-round answer to contrast
+// this with: the text written here is the text published, which is what makes it
+// final by construction — nothing is reported while the loop may still change
+// its mind, so there is nothing to retract. It is also where OnAnswerDelta
+// fires, so a caller sees exactly one text per Run.
+func (l *Loop) writeAnswer(ctx context.Context, question string, result *Result) {
+	l.step(&result.Trace, "[Answer] writing…")
+	started := time.Now()
+	result.Answer = l.answer(ctx, question, result.Evidence, result.MetadataFilter,
+		RenderMemberRecord(question, result.Members))
+	if result.Answer == "" {
+		l.step(&result.Trace, "[Answer] not written: the run found no evidence to answer from.")
+		return
+	}
+	l.step(&result.Trace, fmt.Sprintf("[Answer] written in %s (%d char(s)).",
+		time.Since(started).Round(100*time.Millisecond), len([]rune(result.Answer))))
+}
+
+// attempt is one tool call this run has already made, and what it returned.
+//
+// Recorded so the next round's planner can see it. A round that retrieved
+// nothing is exactly when the model most needs to know what was tried — the
+// evidence sample it would otherwise learn from is empty — and repeating the
+// same empty call is otherwise the single most likely next action.
+type attempt struct {
+	Call  ToolCall
+	Added int
+}
+
+// findAttempt reports whether this exact call has already been made this run.
+func findAttempt(attempts []attempt, call ToolCall) (attempt, bool) {
+	for _, previous := range attempts {
+		if sameToolCall(previous.Call, call) {
+			return previous, true
+		}
+	}
+	return attempt{}, false
+}
+
+// sameToolCall compares a name and its arguments.
+//
+// Arguments are compared through fmt.Sprint rather than with ==, because the
+// same logical call arrives with different concrete types: a number is float64
+// when it came from JSON and int when a test built the map by hand, and those
+// two spellings must count as one call.
+func sameToolCall(a, b ToolCall) bool {
+	if a.Name != b.Name || len(a.Arguments) != len(b.Arguments) {
+		return false
+	}
+	for key, value := range a.Arguments {
+		other, ok := b.Arguments[key]
+		if !ok || fmt.Sprint(other) != fmt.Sprint(value) {
+			return false
+		}
+	}
+	return true
+}
+
+// renderAttempts renders the calls already made, most recent first.
+func renderAttempts(attempts []attempt) string {
+	if len(attempts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nAlready tried this run — do NOT repeat these:\n")
+	// Most recent first: it is the one the model is about to duplicate.
+	for i := len(attempts) - 1; i >= 0; i-- {
+		item := attempts[i]
+		fmt.Fprintf(&b, "- %s(%s) -> +%d passage(s)", item.Call.Name, renderArgs(item.Call.Arguments), item.Added)
+		if item.Added == 0 {
+			b.WriteString("  ← returned nothing; change the field, the value, or the tool")
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // maxGrepLegs caps how many literal probes one round may issue for the terms
@@ -275,29 +530,73 @@ func roundCalls(queries []string, missing []string) []ToolCall {
 // toolPlanSystemPrompt asks the model to choose retrieval tools rather than to
 // answer.
 //
-// Tool selection is a separate call from the draft on purpose: docs/plan.md §6.6
-// keeps the checker reading only the draft, so folding tool choice into the
-// drafting turn would blur what the sufficiency verdict is actually about.
-const toolPlanSystemPrompt = `You choose retrieval tools for a question about a private document set.
+// Tool selection is a separate call from the answer on purpose: the checker
+// judges the pool, and a call that also produced prose would blur what the
+// verdict is about — the passages, not what someone wrote about them.
+//
+// Modelled on RAGFlow's action_run.md playbook (docs/plan.md's reference
+// implementation), cut down to what freerag actually has: the four tools below
+// and nothing else. RAGFlow's playbook also covers navigate_tree,
+// navigate_structure, graph_explore, calculate and web_search — naming a tool
+// the kernel does not answer is how a model spends a round on a call that is
+// silently dropped, so those are gone rather than merely discouraged.
+//
+// This prompt is the fallback path: the live path asks Laya to choose among
+// fully-formed candidate calls (toolchoice.go), which cannot invent a value.
+const toolPlanSystemPrompt = `You choose retrieval calls for a question about a private document set.
 
-Pick the calls most likely to find what is still missing.
+The tools are the ones defined in the API schema for this call — read their WHEN TO
+CALL / DO NOT CALL / ARGUMENTS / IF IT FAILS sections, which are the only guide for
+choosing between them. Never name a tool that is not defined there.
 
-- Call a tool only when it adds information. Return no calls when the evidence
-  already listed is enough.
-- hybrid_search finds passages that mean the same thing; grep_search finds exact
-  strings such as identifiers, codes and rare proper nouns; list_chunks reads a
-  document or a page back in order; metadata_search filters by metadata only.
-- Do not repeat a call that was already made.`
+How to act:
+- metadata_search NARROWS THE WHOLE RUN. The documents it selects become the scope for every later call, so once it has run, do not repeat the filter and do not pass the document again: hybrid_search and grep_search are already limited to those documents. Use it first when the question names or dates documents, then search inside them.
+- A later metadata_search REPLACES the scope, and clear=true lifts it. If you are finding nothing and you set a scope earlier, either widen it or clear it — the evidence list is empty because of the filter, not because the corpus has nothing.
+- Issue every independent call in ONE turn. A turn spent on five calls costs the same as a turn spent on one. Independent means: one per spelling of a name (a keyword index matches literally, so "Apple Inc." and "AAPL" are two searches), one to read one document whole (list_chunks) as against one that searches across documents, and one per missing term. Two rewordings of one spelling are NOT independent — that is one call written twice, and the second is refused as a repeat.
+- Call a tool only when it adds information. Return no calls when the evidence already listed is enough.
+- Never repeat a call that was already made: the index does not change during a run, so it cannot return anything new. Change the field, the value or the tool.`
 
 // renderToolPlanPrompt describes what is already in hand, so the model does not
 // ask for it twice.
 //
 // The evidence is summarised rather than quoted: the model is choosing tools,
 // and the full text would crowd out the window needed for that choice.
-func renderToolPlanPrompt(question string, evidence []store.Hit, missing []string, budget int) string {
+//
+// metadataCatalog is the AVAILABLE METADATA block (see renderMetadataCatalog).
+// It rides here rather than in the system prompt because it is per-index while
+// the system prompt is fixed — and it must not change the prompt PREFIX, which
+// is what the warm-up request primes and Ollama caches.
+//
+// attempts are the calls already made this run. They matter most in the case
+// where the evidence sample below is EMPTY: with nothing retrieved there is
+// nothing to steer by, and the model's most likely next action is to repeat the
+// call that just returned nothing.
+func renderToolPlanPrompt(
+	question string,
+	queries []string,
+	evidence []store.Hit,
+	attempts []attempt,
+	missing []string,
+	budget int,
+	metadataCatalog string,
+) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Question: %s\n\n", question)
+	fmt.Fprintf(&b, "Question: %s\n", question)
+	if len(queries) > 0 {
+		// Spelled out because the candidate list is built from these, and a
+		// planner that searches the question text on its own is reaching for a
+		// query the rewriter already replaced (see RewriteQueries).
+		b.WriteString("\nSearch queries retrieval runs (the question itself is not one of them):\n")
+		for _, query := range queries {
+			fmt.Fprintf(&b, "- %s\n", query)
+		}
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "Already retrieved: %d passage(s).\n", len(evidence))
+
+	if metadataCatalog != "" {
+		fmt.Fprintf(&b, "\n%s\n", metadataCatalog)
+	}
 
 	// A sample is enough to avoid repeats, and it keeps the prompt small.
 	for i, hit := range evidence {
@@ -309,10 +608,18 @@ func renderToolPlanPrompt(question string, evidence []store.Hit, missing []strin
 			truncateRunes(collapse(hit.Chunk.Text), 80))
 	}
 
+	if rendered := renderAttempts(attempts); rendered != "" {
+		b.WriteString(rendered)
+	}
+
 	if len(missing) > 0 {
 		fmt.Fprintf(&b, "\nReported missing: %s\n", strings.Join(missing, ", "))
 	}
-	fmt.Fprintf(&b, "\nChoose at most %d call(s).", budget)
+	// The number is a per-turn allowance, not a total: saying "at most N" without
+	// saying "this turn" reads as a cap on the whole run and makes a small model
+	// hold calls back for no reason.
+	fmt.Fprintf(&b, "\nThis turn runs up to %d call(s): issue every independent call you need now, "+
+		"in this one turn, rather than one per turn.", budget)
 	return b.String()
 }
 
@@ -328,16 +635,52 @@ func (l *Loop) planTools(
 	question string,
 	queries, missing []string,
 	evidence []store.Hit,
+	attempts []attempt,
 	trace *[]string,
 ) []ToolCall {
 	fallback := roundCalls(queries, missing)
+
+	// Laya first when configured: it chooses among fully-formed candidate calls,
+	// so it is fast (~100 ms) and cannot invent a value the index does not hold.
+	// A failure here falls through to the model plan rather than to the
+	// deterministic fallback, because the model plan is still a better answer
+	// than the fixed roundCalls when it is available.
+	if l.Chooser != nil {
+		candidates := buildCandidates(queries, missing, evidence, attempts)
+		if len(candidates) == 0 {
+			l.step(trace, "[Action Session] no untried candidate call remains; stopping retrieval.")
+			return nil
+		}
+		index, err := l.Chooser.Choose(ctx, question, candidates, evidence,
+			renderAttempts(attempts), missing)
+		switch {
+		case err != nil:
+			// Reported in the TRACE, not only in the log. A chooser that fails on
+			// every round is exactly the kind of thing that must be visible where
+			// a user looks, and this one was not: the bug it hid was that two of
+			// Laya's three uses were dead, and it took a full run's transcript to
+			// notice that every round had said "falling back to the model plan".
+			l.step(trace, fmt.Sprintf(
+				"[Action Session] tool choice unavailable (%v); using the model plan.", err))
+			l.logf("[Action Session] tool choice failed (%v); falling back to the model plan", err)
+		case index >= 0 && index < len(candidates):
+			chosen := candidates[index]
+			l.step(trace, fmt.Sprintf("[Action Session] chose %s", chosen.Label))
+			return []ToolCall{chosen.Call}
+		default:
+			l.step(trace, "[Action Session] the chooser stopped: no further retrieval.")
+			return nil
+		}
+	}
+
 	if l.Model == nil {
 		return fallback
 	}
 
 	reply, err := l.Model.Complete(ctx, []Message{
 		{Role: RoleSystem, Content: toolPlanSystemPrompt},
-		{Role: RoleUser, Content: renderToolPlanPrompt(question, evidence, missing, l.spec().ActionMaxTurns)},
+		{Role: RoleUser, Content: renderToolPlanPrompt(question, queries, evidence, attempts, missing,
+			l.spec().ActionMaxTurns, renderMetadataCatalog(l.Store, maxMetadataHintValues))},
 	}, ToolSpecs())
 	if err != nil {
 		l.logf("[Action Session] tool planning failed (%v); using the deterministic plan", err)
@@ -348,19 +691,45 @@ func (l *Loop) planTools(
 		return fallback
 	}
 
+	// Calls already tried this run are dropped HERE rather than only in runTools,
+	// so that a plan consisting entirely of repeats becomes the deterministic
+	// plan instead of an empty round. Measured on a real complex question: a
+	// generating model re-issued the same fabricated metadata filter in all three
+	// rounds of a sub-question, each one refused as a repeat, so the sub-question
+	// finished with an empty pool while the hybrid search that would have worked
+	// was never run. The repeat guard kept the calls from being wasted; it could
+	// not make the round retrieve anything.
 	calls := make([]ToolCall, 0, len(reply.ToolCalls))
-	dropped := 0
+	dropped, repeated := 0, 0
 	for _, call := range reply.ToolCalls {
 		if !KnownTool(call.Name) {
 			dropped++
 			continue
 		}
+		if _, tried := findAttempt(attempts, call); tried {
+			repeated++
+			// Traced HERE because the call no longer reaches runTools, which is
+			// where this refusal used to be reported. Dropping it quietly would
+			// make "the model asked for something it had already tried"
+			// invisible — and that is the fact that explains a round which
+			// retrieved nothing.
+			l.step(trace, fmt.Sprintf(
+				"[Action Session] %s(%s) was already tried this run; not repeating it.",
+				call.Name, renderArgs(call.Arguments)))
+			continue
+		}
 		calls = append(calls, call)
 	}
 	if len(calls) == 0 {
-		l.step(trace, fmt.Sprintf(
-			"[Action Session] the model chose %d tool(s) outside the surface; using the deterministic plan.",
-			dropped))
+		if repeated > 0 {
+			l.step(trace, fmt.Sprintf(
+				"[Action Session] every one of the %d call(s) the model chose was already tried; using the deterministic plan.",
+				repeated))
+		} else {
+			l.step(trace, fmt.Sprintf(
+				"[Action Session] the model chose %d tool(s) outside the surface; using the deterministic plan.",
+				dropped))
+		}
 		return fallback
 	}
 
@@ -390,13 +759,44 @@ func (l *Loop) toolbox() *Toolbox {
 // The number of calls is capped by ActionMaxTurns, mirroring the session's tool
 // budget (docs/plan.md §6.1). A failing tool is recorded and skipped: one bad
 // call must not abandon the round.
-func (l *Loop) runTools(ctx context.Context, calls []ToolCall, evidence *[]store.Hit, seen map[string]bool, trace *[]string) int {
+//
+// Every call is also recorded as an attempt, INCLUDING the ones that failed or
+// matched nothing. Those are the ones the next round most needs to avoid, and
+// they are exactly the ones a hits-only record would omit.
+func (l *Loop) runTools(
+	ctx context.Context,
+	calls []ToolCall,
+	info *kbinfo,
+	trace *[]string,
+	attempts *[]attempt,
+) int {
 	spec := l.spec()
 	toolbox := l.toolbox()
 	added := 0
 	issued := 0
 
 	for _, call := range calls {
+		// An identical call cannot add information: the index does not change
+		// during a run, so a call that returned nothing returns nothing again.
+		//
+		// The planner is told this (renderAttempts) and a small model does not
+		// always comply — a measured run repeated, in round 3, the exact call
+		// that had already returned nothing in round 1, with the call listed and
+		// marked "returned nothing" in the prompt it was answering. Refusing it
+		// here makes the saving a property of the loop rather than of the
+		// model's instruction-following, and it is checked BEFORE the budget so
+		// a repeat cannot spend a turn that would otherwise retrieve something.
+		if previous, repeated := findAttempt(*attempts, call); repeated {
+			note := fmt.Sprintf("+%d passage(s)", previous.Added)
+			if previous.Added == 0 {
+				note = "it returned nothing"
+			}
+			l.step(trace, fmt.Sprintf(
+				"[Action Session] %s(%s) was already tried this run (%s); not repeating it.",
+				call.Name, renderArgs(call.Arguments), note))
+			continue
+		}
+
 		if issued >= spec.ActionMaxTurns {
 			l.step(trace, fmt.Sprintf(
 				"[Action Session] tool budget spent (%d call(s)); stopping retrieval.", issued))
@@ -404,26 +804,43 @@ func (l *Loop) runTools(ctx context.Context, calls []ToolCall, evidence *[]store
 		}
 		issued++
 
-		result, err := toolbox.Execute(ctx, call)
+		// The scope goes INTO the search, not onto its results: a top-k taken
+		// globally and then sifted can come back empty while in-scope passages
+		// exist (see store.Filter).
+		result, err := toolbox.ExecuteScoped(ctx, call, info.filter())
 		if err != nil {
+			*attempts = append(*attempts, attempt{Call: call})
 			l.step(trace, fmt.Sprintf("[Tool] %s failed: %v", call.Name, err))
 			continue
 		}
 
-		fresh := 0
-		for _, hit := range result.Hits {
-			key := hit.Chunk.DocID + "\x00" + hit.Chunk.ChunkID
-			if seen[key] {
-				continue
+		// The scope is adopted BEFORE the hits are added: metadata_search both
+		// selects the documents and returns their chunks, and the documents it
+		// just selected must be inside the scope they establish.
+		if result.Scope != nil {
+			if result.Scope.Clear {
+				info.clearScope()
+			} else {
+				info.setScope(result.Scope.DocIDs, result.Scope.Note)
 			}
-			seen[key] = true
-			*evidence = append(*evidence, hit)
-			fresh++
+			l.step(trace, fmt.Sprintf("[Scope] %s.", result.Scope.Note))
 		}
+
+		outside := info.outOfScope
+		fresh := info.add(result.Hits)
 		added += fresh
+		*attempts = append(*attempts, attempt{Call: call, Added: fresh})
+		scopeNote := ""
+		if info.outOfScope > outside {
+			// Reported, not silent: a call that found passages and contributed
+			// fewer ones is something the trace should say out loud, or the
+			// filter looks like a corpus with holes in it.
+			scopeNote = fmt.Sprintf(" %d passage(s) from outside the scope were ignored.",
+				info.outOfScope-outside)
+		}
 		l.step(trace, fmt.Sprintf(
-			"[Tool] %s(%s) -> +%d passage(s). %s",
-			call.Name, renderArgs(call.Arguments), fresh, result.Note))
+			"[Tool] %s(%s) -> +%d passage(s). %s%s",
+			call.Name, renderArgs(call.Arguments), fresh, result.Note, scopeNote))
 	}
 	return added
 }
@@ -470,24 +887,160 @@ func (l *Loop) Warm(ctx context.Context) error {
 	return err
 }
 
-// draft produces the intermediate draft the checker reviews.
+// generate performs one answer-writing call, reporting the text as it is
+// written when onDelta is set.
 //
-// With a model it is a generation call; without one — or when that call fails —
-// it degrades to an extractive draft, because the loop must keep making
-// progress rather than stall on an unavailable model.
-func (l *Loop) draft(ctx context.Context, question string, evidence []store.Hit) string {
+// With no model — or when the call fails, or returns nothing — it degrades to an
+// extractive answer, because the loop must keep making progress rather than stall
+// on an unavailable model.
+func (l *Loop) generate(
+	ctx context.Context,
+	question string,
+	evidence []store.Hit,
+	onDelta func(string),
+	scopeNote string,
+	memberRecord string,
+) string {
 	if l.Model != nil {
-		reply, err := l.Model.Complete(ctx, []Message{
-			{Role: RoleSystem, Content: draftSystemPrompt},
-			{Role: RoleUser, Content: renderEvidence(question, evidence, l.maxPromptChars())},
-		}, nil)
+		messages := []Message{
+			{Role: RoleSystem, Content: answerSystemPrompt + answerLanguageDirective(l.spec().AnswerLanguage)},
+			{Role: RoleUser, Content: scopePrefix(scopeNote) + renderEvidence(question, evidence, l.maxPromptChars(), memberRecord)},
+		}
+
+		var (
+			reply *Reply
+			err   error
+		)
+		if streaming, ok := l.Model.(StreamingModel); ok && onDelta != nil {
+			reply, err = streaming.CompleteStream(ctx, messages, nil, onDelta)
+		} else {
+			reply, err = l.Model.Complete(ctx, messages, nil)
+		}
+
 		if err != nil {
-			l.logf("[Draft] model call failed (%v); falling back to an extractive draft", err)
+			l.logf("[Answer] model call failed (%v); falling back to an extractive answer", err)
 		} else if reply != nil && strings.TrimSpace(reply.Content) != "" {
-			return truncateRunes(strings.TrimSpace(reply.Content), l.maxDraftChars())
+			return truncateRunes(strings.TrimSpace(reply.Content), l.maxExtractiveAnswerChars())
 		}
 	}
-	return truncateRunes(extractiveDraft(evidence), l.maxDraftChars())
+	return truncateRunes(extractiveAnswer(evidence), l.maxExtractiveAnswerChars())
+}
+
+// (There is no answer() any more. It wrote the per-round text the checker judged,
+// and the bug its own comment warned about — a rejected answer streamed into the
+// answer area and then replaced — is unreachable now by construction, because
+// the only text the loop asks a model to write is the final answer. See kbinfo.)
+
+// answer writes the answer the user reads, reporting it as it is written.
+//
+// Called ONCE, after the loop has settled which evidence to use. That is the
+// whole point of separating it from answer: the rounds decide WHAT to answer
+// from — each round's answer is a proposal the checker accepts or rejects — and
+// the answer is then written once, against the settled pool. Generating it
+// per round instead both publishes prose written against evidence the loop had
+// not finished gathering, and puts the reader in front of a text that is
+// replaced under them.
+//
+// The order is also what makes the streamed text final by construction: nothing
+// is published while the loop is still deciding, so there is nothing to retract.
+func (l *Loop) answer(
+	ctx context.Context,
+	question string,
+	evidence []store.Hit,
+	scopeNote string,
+	memberRecord string,
+) string {
+	if len(evidence) == 0 {
+		// Nothing to answer from. The caller reports that, in its own words: a
+		// model handed an empty evidence block writes a sentence that reads
+		// like a finding about the corpus ("there is no information about this
+		// author") when it is a report of a lookup that never happened.
+		return ""
+	}
+	// nil when nothing is listening, so the model is not made to call through a
+	// closure that goes nowhere.
+	var onDelta func(string)
+	if l.OnAnswerDelta != nil {
+		onDelta = l.OnAnswerDelta
+	}
+	return l.generate(ctx, question, evidence, onDelta, scopeNote, memberRecord)
+}
+
+// scopePrefix tells the generator that the search was narrowed, so that "the
+// evidence does not say" is not written as "the documents do not say".
+//
+// The distinction is the same one metadata_search's empty-result note draws for
+// the model, moved one step later: the model wrote that note while it could
+// still act on it, and by the time an answer is written only the wording is
+// left. A run filtered to one document that finds nothing there has learned
+// about that document, not about the corpus.
+func scopePrefix(scopeNote string) string {
+	trimmed := strings.TrimSpace(scopeNote)
+	if trimmed == "" {
+		return ""
+	}
+	return fmt.Sprintf(
+		"Search scope: this run was RESTRICTED to a subset of the corpus — %s. "+
+			"If the evidence does not answer the question, say it was not found within this scope and "+
+			"name the scope, rather than stating that the documents do not contain it.\n\n",
+		trimmed)
+}
+
+// searchQueries establishes the query set retrieval starts from.
+//
+// Reported rather than silent: "the queries changed" is the part of a run a
+// reader cannot otherwise see, and when the rewriter declines (no model, a
+// failed call, an unusable reply) that is worth knowing before wondering why the
+// first round retrieved nothing.
+func (l *Loop) searchPlan(ctx context.Context, question string, trace *[]string) QueryPlan {
+	plan := PlanQueries(ctx, l.Model, question, maxSearchQueries)
+	if !plan.Rewritten {
+		l.step(trace, "[QueryRewriter] no usable rewrite; searching the question as asked.")
+		return plan
+	}
+	l.step(trace, fmt.Sprintf("[QueryRewriter] searching %s", joinQuoted(plan.Queries)))
+	return plan
+}
+
+// enterEnumeration applies the strategy's two decisions to a run whose
+// declaration passed the gate.
+//
+// The recall list becomes the declared operands, and the round budget is bounded
+// to two. Both are RAGFlow's:
+//
+//   - enumeration does not go through query rewriting at all — its recall runs
+//     off Coverage.Operands before any rewrite happens (coverage_enumerate.go), so
+//     the rewrites a generic run would issue are exactly the near-duplicates this
+//     strategy exists to avoid;
+//   - the bound is `CoverageOf(table).Ok() && rounds > 2 → 2`
+//     (agentic_rag_graph.go:1642), with its reason: once a set is being
+//     enumerated, further rounds re-ask the same list rather than find different
+//     things.
+func (l *Loop) enterEnumeration(cov Coverage, queries []string, rounds int, trace *[]string) ([]string, int) {
+	if operands := cov.Operands(); len(operands) > 0 {
+		l.step(trace, fmt.Sprintf("[Enumerate] the answer is a set of %s: recalling %d operand(s) — %s",
+			cov.ItemKind, len(operands), joinQuoted(operands)))
+		queries = operands
+	} else {
+		l.step(trace, fmt.Sprintf("[Enumerate] the answer is a set of %s; no operand was declared, so the queries stand.", cov.ItemKind))
+	}
+	if rounds > enumMaxRounds {
+		l.step(trace, fmt.Sprintf("[Enumerate] rounds bounded %d -> %d.", rounds, enumMaxRounds))
+		rounds = enumMaxRounds
+	}
+	return queries, rounds
+}
+
+// extractMembers runs the one extraction call the enumeration makes.
+func (l *Loop) extractMembers(ctx context.Context, question string, evidence []store.Hit, trace *[]string) []Member {
+	if l.Model == nil {
+		return nil
+	}
+	started := time.Now()
+	members := ExtractMembers(ctx, l.Model, question, evidence, PromptCharBudget(DefaultContextTokens))
+	l.step(trace, fmt.Sprintf("[Enumerate] %d member(s) anchored out of %d passage(s) in %s.",
+		len(members), len(evidence), time.Since(started).Round(100*time.Millisecond)))
+	return members
 }
 
 // rewrite asks the model for one new query, falling back to the missing terms
@@ -519,15 +1072,25 @@ func (l *Loop) rewrite(ctx context.Context, question string, missing []string) [
 	return []string{question + " " + strings.Join(missing, " ")}
 }
 
-// renderEvidence renders the numbered evidence block for the draft prompt.
+// renderEvidence renders the numbered evidence block for the answer prompt.
 //
 // maxChars bounds the block so the prompt fits the generator's context window.
 // Passages are added in rank order until the budget runs out; the last one is
 // trimmed mid-text rather than dropped, and the omission is stated so the model
 // knows the evidence was cut instead of silently reasoning over a partial list.
-func renderEvidence(question string, evidence []store.Hit, maxChars int) string {
+func renderEvidence(question string, evidence []store.Hit, maxChars int, extra string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Question: %s\n\nEvidence:\n", question)
+	fmt.Fprintf(&b, "Question: %s\n\n", question)
+
+	// The enumeration record sits between the question and the passages: it says
+	// what the list already holds, which is what the writer needs before reading
+	// the evidence the list is drawn from. It counts against the same budget,
+	// because it consumes the same context.
+	if block := strings.TrimSpace(extra); block != "" {
+		b.WriteString(block)
+		b.WriteString("\n")
+	}
+	b.WriteString("Evidence:\n")
 
 	kept := 0
 	for i, hit := range evidence {
@@ -556,8 +1119,8 @@ func renderEvidence(question string, evidence []store.Hit, maxChars int) string 
 	return b.String()
 }
 
-// extractiveDraft is the model-free draft: the top passages, quoted and cited.
-func extractiveDraft(evidence []store.Hit) string {
+// extractiveAnswer is the model-free answer: the top passages, quoted and cited.
+func extractiveAnswer(evidence []store.Hit) string {
 	const maxPassages = 6
 	if len(evidence) == 0 {
 		return ""
@@ -589,13 +1152,48 @@ func truncateRunes(text string, n int) string {
 	return string(runes[:n])
 }
 
-// Prompts. The draft prompt demands [n] citations: with the checker reading the
-// draft only (docs/plan.md §6.6), citation markers are the one signal that ties
-// the draft back to the evidence.
-const draftSystemPrompt = `You answer the user's question using ONLY the numbered evidence passages provided.
-Write a short answer of two to four sentences. Cite the passages you used as [n].
+// Prompts. The answer prompt demands [n] citations: with the checker reading the
+// answer only (docs/plan.md §6.6), citation markers are the one signal that ties
+// the answer back to the evidence.
+//
+// The length of the answer is decided here and nowhere else. Measured on the
+// reference machine, one question and one evidence set produced 147 characters
+// under the previous "two to four sentences" instruction and 537 under this one.
+// num_predict is a ceiling that was never reached (296 tokens at most) and
+// ExtractiveAnswerChars a clamp that never engaged, so neither actually shaped the
+// answer — only this text did.
+//
+// Everything after the first line is a constraint rather than a style note, and
+// asking for more makes each one load-bearing: a longer answer needs more
+// citations, and the failure mode of "be thorough" is a paragraph of confident
+// invention with a citation bolted on. The last line exists because that already
+// happened once — against a document whose headings are separate chunks, a
+// longer answer cited the heading "重点考核：" as though it were content.
+const answerSystemPrompt = `You answer the user's question using ONLY the numbered evidence passages provided.
+Answer as thoroughly and completely as the evidence allows: cover every point it
+supports, and organise a long answer so it stays readable.
+Cite the passages you used as [n], placing each marker after the claim it supports.
 If the evidence does not answer the question, state what is missing instead of guessing.
-Never invent facts.`
+Never invent facts. Never cite a passage that does not support the sentence it is attached to.`
 
 const rewriteSystemPrompt = `You write ONE search query that would find the information still missing.
 Output the query text only — no quotes, no explanation, no surrounding punctuation.`
+
+// answerLanguageDirective tells the model which language to answer in.
+//
+// A directive rather than a separate prompt: the evidence block is in whatever
+// language the corpus is, and a model left to itself mirrors it — so a Chinese
+// question over English papers came back in English. Identifiers are called out
+// explicitly because translating a model name or a quoted term makes the answer
+// unverifiable against the passage it cites.
+func answerLanguageDirective(language string) string {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "zh", "cn", "chinese", "中文", "简体中文":
+		return "\nWrite the answer in Chinese (简体中文), even when the evidence is in another language. " +
+			"Leave identifiers, model names, numbers and quoted phrases in their original form."
+	case "en", "english", "英文":
+		return "\nWrite the answer in English, even when the evidence is in another language. " +
+			"Leave identifiers, model names, numbers and quoted phrases in their original form."
+	}
+	return ""
+}

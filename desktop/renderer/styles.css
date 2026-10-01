@@ -1,15 +1,117 @@
+/* ===========================================================================
+   Themes
+
+   Two palettes, one set of names. Components never name a colour — they name a
+   ROLE (`--panel` is "a surface raised above the page", `--line` is "the
+   hairline between two of them"), and the palettes below are the only place a
+   hex value appears.
+
+   The one rule that matters when editing the light palette: keep the ELEVATION
+   ORDER, do not invert the luminance. In the dark theme a raised surface is
+   lighter than the page behind it; in the light theme it is whiter than it.
+   `--sunken < --bg < --panel < --panel-2` holds in both, which is what lets
+   every component keep its own rule without knowing which theme is on.
+
+   `color-scheme` is set per theme and is not decoration: it is what makes the
+   native scrollbars, text selection and form controls follow the palette
+   instead of staying dark on a white page.
+   =========================================================================== */
+
 :root {
+  color-scheme: dark;
+
+  /* Surfaces, in elevation order. */
+  --sunken: #0a0c10;
   --bg: #0f1115;
   --panel: #161a21;
   --panel-2: #1c222b;
+
   --line: #262d38;
+  --line-strong: #38414f;
+
   --text: #e6e9ef;
+  --text-soft: #c2c9d6;
   --muted: #8b94a3;
+
   --accent: #4c8dff;
+  --accent-hover: #3f7ef0;
+  --accent-text: #9dc0ff;
+  --accent-mark: #7b61ff;
+  --on-accent: #ffffff;
+  /* Four tints rather than fifteen literals: a wash behind a row, a fill for a
+     selected one, a heavier fill for hover-on-selected, and a border. */
+  --accent-wash: rgba(76, 141, 255, 0.1);
+  --accent-fill: rgba(76, 141, 255, 0.18);
+  --accent-fill-strong: rgba(76, 141, 255, 0.34);
+  --accent-line: rgba(76, 141, 255, 0.4);
+
   --ok: #3fb950;
   --warn: #d29922;
   --bad: #f85149;
+  --ok-line: rgba(63, 185, 80, 0.4);
+  --warn-line: rgba(210, 153, 34, 0.4);
+  --bad-line: rgba(248, 81, 73, 0.45);
+  --bad-text: #ffb4ae;
+
+  --scrim: rgba(0, 0, 0, 0.5);
+  /* The paper. A rendered PDF page is white in a dark app too — it is a picture
+     of a page, not a surface of this UI. */
+  --paper: #ffffff;
+
+  /* The chunk highlight, drawn ON that paper in both themes, so it is defined
+     ONCE and never overridden. Left to follow the palette it would be tuned
+     against a near-black background in the dark theme and then vanish over
+     white. */
+  --box-wash: rgba(76, 141, 255, 0.14);
+  --box-fill: rgba(26, 109, 255, 0.3);
+  --box-halo: rgba(26, 109, 255, 0.18);
+  --box-line: rgba(60, 125, 235, 0.6);
+  --box-line-hover: #1a6dff;
+
   --radius: 10px;
+}
+
+/* The light palette. Every value here was picked against the surface it sits
+   on rather than derived by inverting the dark one — an inversion gives a
+   status green of #3fb950, which is 1.9:1 on white: unreadable as text and
+   invisible as a hairline. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --sunken: #e4e8ee;
+  --bg: #eef1f5;
+  --panel: #f7f9fb;
+  --panel-2: #ffffff;
+
+  --line: #d5dbe3;
+  --line-strong: #b3bdcb;
+
+  --text: #1f2328;
+  --text-soft: #3a414a;
+  --muted: #656d76;
+
+  --accent: #0969da;
+  --accent-hover: #0550ae;
+  --accent-text: #0550ae;
+  --accent-mark: #6639ba;
+  --on-accent: #ffffff;
+  /* Weaker alphas than the dark theme's, deliberately: the same 0.18 over white
+     is a far stronger wash than over near-black, and a selected card would read
+     as a differently-coloured component rather than as a selected one. */
+  --accent-wash: rgba(9, 105, 218, 0.07);
+  --accent-fill: rgba(9, 105, 218, 0.12);
+  --accent-fill-strong: rgba(9, 105, 218, 0.22);
+  --accent-line: rgba(9, 105, 218, 0.32);
+
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --ok-line: rgba(26, 127, 55, 0.35);
+  --warn-line: rgba(154, 103, 0, 0.35);
+  --bad-line: rgba(207, 34, 46, 0.4);
+  --bad-text: #a40e26;
+
+  --scrim: rgba(31, 35, 40, 0.45);
 }
 
 * {
@@ -56,8 +158,8 @@ body {
   width: 24px;
   height: 24px;
   border-radius: 7px;
-  background: linear-gradient(135deg, var(--accent), #7b61ff);
-  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-mark));
+  color: var(--on-accent);
   font-weight: 700;
   font-size: 13px;
 }
@@ -74,6 +176,23 @@ body {
   justify-content: flex-end;
 }
 
+/* The theme toggle and the health chips share this end of the bar, and they are
+   grouped rather than spread by space-between: one is a control, the others are
+   readouts, and pushing the control to the far edge would separate it from the
+   only other thing on that side. */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
+.icon {
+  padding: 1px 8px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .chip {
   padding: 2px 9px;
   border-radius: 999px;
@@ -86,52 +205,284 @@ body {
 
 .chip.ok {
   color: var(--ok);
-  border-color: rgba(63, 185, 80, 0.35);
+  border-color: var(--ok-line);
 }
 
 .chip.warn {
   color: var(--warn);
-  border-color: rgba(210, 153, 34, 0.35);
+  border-color: var(--warn-line);
 }
 
 .chip.bad {
   color: var(--bad);
-  border-color: rgba(248, 81, 73, 0.4);
+  border-color: var(--bad-line);
 }
 
-/* ---- layout ---- */
+/* ---- views and panes ---- */
 
-.layout {
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.tab {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+}
+
+.tab:hover {
+  border-color: var(--line);
+}
+
+.tab.active {
+  background: var(--panel-2);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.view {
   flex: 1;
-  display: grid;
-  grid-template-columns: 300px 1fr;
+  display: flex;
   min-height: 0;
 }
 
-.sidebar {
+.pane {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   padding: 14px;
-  background: var(--panel);
-  border-right: 1px solid var(--line);
+  flex: 1;
+  min-width: 0;
   min-height: 0;
+  overflow-y: auto;
 }
 
-.sidebar-head {
+/* A rail rather than a workspace: fixed width so the content keeps the room
+   when the window grows. */
+.pane-narrow {
+  flex: 0 0 240px;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.pane-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  flex: none;
 }
 
-.sidebar-head h2 {
+.pane-head h2 {
   margin: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+.pane-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+/* The knowledge rail has to hold three buttons in 240px. Left to shrink they
+   compress until their labels wrap mid-word ("重命 / 名"), which reads as a
+   broken control rather than a tight one. */
+.pane-head button {
+  flex: none;
+  white-space: nowrap;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.pane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ---- selectable lists: knowledge bases, sessions, conversations ---- */
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.list-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.list-item:hover {
+  background: var(--panel-2);
+}
+
+.list-item.active {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+}
+
+.list-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-meta {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- the session picker ----
+   A screen rather than a rail: it is a choice, and a choice reads better with
+   room around it than as a list wedged against the window edge. */
+
+.picker {
+  align-items: center;
+}
+
+.picker-head,
+.sessions {
+  width: 100%;
+  max-width: 720px;
+}
+
+.picker-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 24px 0 4px;
+}
+
+.picker-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.picker-head p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.sessions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 36px 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  cursor: pointer;
+}
+
+.session-card:hover {
+  border-color: var(--accent);
+}
+
+.session-card-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Shown, not offered: the binding is fixed at creation, and a control here
+   would imply it can be changed. */
+.session-kb {
+  flex: none;
+  max-width: 40%;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card button.tiny {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.session-card:hover button.tiny {
+  opacity: 1;
+}
+
+/* ---- inside one session ---- */
+
+.session {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.session-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+/* ---- documents ---- */
 
 .dropzone {
   padding: 14px 10px;
@@ -140,13 +491,14 @@ body {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+  cursor: pointer;
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 
 .dropzone.over {
   border-color: var(--accent);
   color: var(--text);
-  background: rgba(76, 141, 255, 0.08);
+  background: var(--accent-wash);
 }
 
 .documents {
@@ -161,27 +513,28 @@ body {
   gap: 6px;
 }
 
-.doc {
+/* Flex column, not a plain block: the name and meta are spans, and an inline
+   element ignores overflow/text-overflow — so a long file name pushed the row
+   wider than the pane instead of being ellipsised. */
+.document {
   position: relative;
+  display: flex;
+  flex-direction: column;
   padding: 9px 10px;
+  padding-right: 68px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel-2);
 }
 
-.doc.stale {
-  border-color: rgba(210, 153, 34, 0.5);
-}
-
-.doc-title {
+.document .doc-name {
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding-right: 44px;
 }
 
-.doc-meta {
+.document .doc-meta {
   color: var(--muted);
   font-size: 12px;
   margin-top: 2px;
@@ -190,7 +543,9 @@ body {
   white-space: nowrap;
 }
 
-.doc-forget {
+/* Revealed on hover: removal is not the reason anyone opens this screen, and a
+   row of red buttons is what the eye goes to first. */
+.document > button {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -198,28 +553,85 @@ body {
   transition: opacity 0.15s;
 }
 
-.doc:hover .doc-forget {
+.document:hover > button {
   opacity: 1;
 }
 
-.sidebar-foot {
-  flex: none;
-  color: var(--muted);
-  font-size: 12px;
-  border-top: 1px solid var(--line);
-  padding-top: 8px;
+.bad-text {
+  color: var(--bad);
 }
 
-/* ---- workspace ---- */
+/* ---- messages ---- */
 
-.workspace {
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 18px;
-  overflow-y: auto;
-  min-height: 0;
+  padding-right: 4px;
 }
+
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The question is right-aligned and inset. A transcript has no other structure
+   to carry, so the two sides have to be distinguishable at a glance. */
+.message.user {
+  align-items: flex-end;
+}
+
+.bubble {
+  max-width: 80%;
+  padding: 9px 13px;
+  border-radius: 12px 12px 3px 12px;
+  background: var(--accent-fill);
+  border: 1px solid var(--accent-line);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message.assistant .draft {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 12px 14px;
+  word-break: break-word;
+}
+
+/* ---- the trace that produced an answer ---- */
+
+/* Quieter than the answer it precedes: it answers "how did it get here", which
+   is asked after the answer has been read, not before. */
+.trace {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.trace > summary {
+  padding: 7px 11px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.trace > pre {
+  margin: 0;
+  padding: 0 11px 10px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---- asking ---- */
 
 .ask {
   display: flex;
@@ -236,7 +648,8 @@ textarea {
 }
 
 input,
-textarea {
+textarea,
+select {
   padding: 10px 12px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
@@ -246,7 +659,8 @@ textarea {
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -262,7 +676,7 @@ button {
 }
 
 button:hover {
-  border-color: #38414f;
+  border-color: var(--line-strong);
 }
 
 button:disabled {
@@ -273,19 +687,83 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 500;
   padding: 10px 18px;
 }
 
 button.primary:hover:not(:disabled) {
-  background: #3f7ef0;
+  background: var(--accent-hover);
 }
 
 button.ghost {
   background: transparent;
   color: var(--accent);
-  border-color: rgba(76, 141, 255, 0.4);
+  border-color: var(--accent-line);
+}
+
+button.danger {
+  color: var(--bad);
+  border-color: var(--bad-line);
+}
+
+button.tiny {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 0 7px;
+  line-height: 1.5;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.list-item:hover button.tiny {
+  opacity: 1;
+}
+
+/* ---- prompt dialog ---- */
+
+.dialog {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  padding: 0;
+  min-width: 340px;
+}
+
+.dialog::backdrop {
+  background: var(--scrim);
+}
+
+.dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+}
+
+.dialog h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.center {
+  text-align: center;
 }
 
 .hidden {
@@ -352,12 +830,12 @@ button.ghost {
 }
 
 .notice.ok {
-  border-color: rgba(63, 185, 80, 0.4);
+  border-color: var(--ok-line);
 }
 
 .notice.bad {
-  border-color: rgba(248, 81, 73, 0.45);
-  color: #ffb4ae;
+  border-color: var(--bad-line);
+  color: var(--bad-text);
 }
 
 /* ---- answer ---- */
@@ -384,12 +862,12 @@ button.ghost {
 
 .badge.ok {
   color: var(--ok);
-  border-color: rgba(63, 185, 80, 0.4);
+  border-color: var(--ok-line);
 }
 
 .badge.warn {
   color: var(--warn);
-  border-color: rgba(210, 153, 34, 0.4);
+  border-color: var(--warn-line);
 }
 
 .draft {
@@ -409,15 +887,15 @@ button.ghost {
   padding: 0 4px;
   border-radius: 5px;
   border: none;
-  background: rgba(76, 141, 255, 0.18);
-  color: #9dc0ff;
+  background: var(--accent-fill);
+  color: var(--accent-text);
   font-size: 11px;
   line-height: 17px;
   vertical-align: 1px;
 }
 
 .cite:hover {
-  background: rgba(76, 141, 255, 0.34);
+  background: var(--accent-fill-strong);
 }
 
 /* ---- evidence ---- */
@@ -448,7 +926,7 @@ button.ghost {
 
 .evidence-item.flash {
   border-color: var(--accent);
-  background: rgba(76, 141, 255, 0.09);
+  background: var(--accent-wash);
 }
 
 .evidence-head {
@@ -472,7 +950,7 @@ button.ghost {
 
 .evidence-text {
   font-size: 12.5px;
-  color: #c2c9d6;
+  color: var(--text-soft);
   max-height: 132px;
   overflow: hidden;
   white-space: pre-wrap;
@@ -510,4 +988,242 @@ button.ghost {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- the chunk inspector ----
+   Two panes that have to agree about one thing: where a chunk came from. The
+   left is the page as it was rendered, the right is the text cut from it, and a
+   box drawn over the page is what makes the pair read as one object instead of
+   two lists. */
+
+.split {
+  flex-direction: row;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.inspect {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+#inspect-empty {
+  flex: 1;
+}
+
+.origin {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+
+.origin-head,
+.chunklist-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.origin-head .spacer {
+  flex: 1;
+}
+
+.origin-head button {
+  padding: 2px 10px;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.origin-head button:disabled {
+  opacity: 0.35;
+}
+
+.origin-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  background: var(--sunken);
+}
+
+/* The frame is the positioning context. Every box is a PERCENTAGE of it, so the
+   overlay rescales with the image and no layout maths is needed on resize — and
+   the percentages are of the page's size in points, which is the space bbox is
+   measured in. */
+.page-frame {
+  position: relative;
+  margin: 0 auto;
+  width: min(100%, 820px);
+  line-height: 0;
+}
+
+.page-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+.page-boxes {
+  position: absolute;
+  inset: 0;
+}
+
+.box {
+  position: absolute;
+  border: 1.5px solid var(--box-line);
+  border-radius: 3px;
+  background: var(--box-wash);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.box:hover {
+  border-color: var(--box-line-hover);
+  background: var(--box-fill);
+}
+
+.box.selected {
+  border-color: var(--box-line-hover);
+  border-width: 2px;
+  background: var(--box-fill);
+  box-shadow: 0 0 0 2px var(--box-halo);
+}
+
+.origin-status {
+  padding: 10px 4px 0;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---- the chunk list ---- */
+
+.chunklist {
+  flex: none;
+  width: 400px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.chunks {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chunk {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.chunk:hover {
+  border-color: var(--line-strong);
+}
+
+.chunk.selected {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.chunk-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.chunk-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chunk-type {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.chunk-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 4.6em;
+  overflow: hidden;
+}
+
+.chunk.selected .chunk-text {
+  max-height: none;
+}
+
+.chunk-nobox {
+  color: var(--warn);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.check input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+/* The document list doubles as the inspector's selector, so the chosen one has
+   to stay marked while the panes beside it change. */
+.document {
+  cursor: pointer;
+}
+
+.document.active {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* A checkbox row: the label is the text, the box sits beside it rather than
+   above it the way a text field's label does. */
+.field.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field.check input {
+  width: auto;
+  margin: 0;
+  flex: none;
+}
+
+.field.check span {
+  flex: 1;
 }

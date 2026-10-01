@@ -35,6 +35,33 @@ type DenseIndex interface {
 	Len() int
 }
 
+// ScopedDenseIndex is a DenseIndex that can restrict a search to a set of
+// documents inside the index.
+//
+// Optional, and separate from DenseIndex, because it is the difference between a
+// scope and a post-filter: an index that cannot filter returns a global top-k
+// which is then sifted, so a scoped query can come back empty while in-scope
+// passages exist (see Filter). Implementations that can push the restriction
+// down should, and the ones that cannot keep working — the sifter is the safety
+// net, not the mechanism.
+type ScopedDenseIndex interface {
+	DenseIndex
+	// SearchScoped returns the nearest chunks to vector among docIDs, best
+	// first. docIDs is never empty.
+	SearchScoped(vector []float32, limit int, docIDs []string) ([]DenseMatch, error)
+}
+
+// DroppableIndex is a DenseIndex that owns its own storage and can discard it.
+//
+// Separate from DenseIndex because most of them cannot: the in-process scan has
+// no storage of its own, and requiring Drop of every implementation would make
+// that one pretend. Deleting a knowledge base needs it, so the caller
+// type-asserts and skips the step when it is absent.
+type DroppableIndex interface {
+	DenseIndex
+	Drop() error
+}
+
 // SetDenseIndex attaches an external dense retriever.
 //
 // The store keeps its own copy of the vectors even when one is attached: they
@@ -102,7 +129,7 @@ func (s *Store) EmbeddedChunks() ([]Chunk, [][]float32) {
 // database is down would turn a degraded search into a failed one, and a
 // retrieval tool that returns no hits is worse than one that returns the
 // keyword matches it can still compute.
-func (s *Store) searchDense(vector []float32, limit int) ([]Hit, bool) {
+func (s *Store) searchDense(vector []float32, limit int, filter Filter) ([]Hit, bool) {
 	s.mu.RLock()
 	index := s.dense
 	dims := s.dims
@@ -118,13 +145,28 @@ func (s *Store) searchDense(vector []float32, limit int) ([]Hit, bool) {
 		return nil, false
 	}
 
-	matches, err := index.Search(vector, limit)
+	var (
+		matches []DenseMatch
+		err     error
+	)
+	if scoped, ok := index.(ScopedDenseIndex); ok && filter.Active() {
+		// The index filters, so the limit it is given is a limit WITHIN the
+		// scope. This is the branch that makes a scope a scope.
+		matches, err = scoped.SearchScoped(vector, limit, filter.Docs())
+	} else {
+		// An index that cannot filter is still asked, and its answer is sifted
+		// afterwards. Weaker on purpose and documented in Filter: in-scope
+		// passages can lose their slots to out-of-scope ones here, and the
+		// in-process fallback (which filters exactly) is what covers the case
+		// where that matters.
+		matches, err = index.Search(vector, limit)
+	}
 	if err != nil {
 		s.loggerOr().Printf("warning: dense index %s search failed (%v); falling back to the in-process scan",
 			index.Backend(), err)
 		return nil, false
 	}
-	return s.resolve(matches), true
+	return s.resolveIn(matches, filter), true
 }
 
 // resolve maps dense matches back to the chunks this store owns.
@@ -132,11 +174,21 @@ func (s *Store) searchDense(vector []float32, limit int) ([]Hit, bool) {
 // A match with no chunk here is dropped rather than fabricated: it means the
 // index and the chunk store disagree, and inventing a hit would hide that.
 func (s *Store) resolve(matches []DenseMatch) []Hit {
+	return s.resolveIn(matches, Filter{})
+}
+
+// resolveIn is resolve with the filter applied to what comes back, which is a
+// safety net rather than the mechanism: an index that can filter was already
+// asked to (see searchDense), and this catches one that cannot or did not.
+func (s *Store) resolveIn(matches []DenseMatch, filter Filter) []Hit {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	out := make([]Hit, 0, len(matches))
 	for _, match := range matches {
+		if !filter.Allows(match.DocID) {
+			continue
+		}
 		index, ok := s.seen[dedupKey(Chunk{DocID: match.DocID, ChunkID: match.ChunkID})]
 		if !ok || index >= len(s.chunks) {
 			continue

@@ -23,6 +23,12 @@ const defaultParseTimeout = 10 * time.Minute
 // budget covers the one-off session build on a cold sidecar.
 const defaultDecideTimeout = 2 * time.Minute
 
+// defaultRenderTimeout bounds one page render. A page at the default dpi takes
+// well under a second; the generous bound covers a pathological page at the
+// maximum dpi, where a timeout would surface as a broken page rather than as an
+// error the UI can show.
+const defaultRenderTimeout = 30 * time.Second
+
 // Chunk is one parsed chunk as the sidecar returns it.
 type Chunk struct {
 	ChunkID  string         `json:"chunk_id"`
@@ -54,6 +60,9 @@ type Options struct {
 	MaxChars int
 	// MaxPages limits how many pages are read (0 = all).
 	MaxPages int
+	// VlmModel names an Ollama vision model that describes Figure regions
+	// during the parse (parse-time only). Empty disables it.
+	VlmModel string
 	// Timeout bounds the call; 0 uses defaultParseTimeout.
 	Timeout time.Duration
 }
@@ -213,6 +222,9 @@ func (s *Service) Parse(ctx context.Context, path string, opts Options) (*Result
 	if opts.MaxPages > 0 {
 		params["max_pages"] = opts.MaxPages
 	}
+	if opts.VlmModel != "" {
+		params["vlm_model"] = opts.VlmModel
+	}
 
 	timeout := opts.Timeout
 	if timeout <= 0 {
@@ -286,6 +298,64 @@ func (s *Service) HasLaya(ctx context.Context) bool {
 	}
 	available, _ := info.Capabilities["laya"].(bool)
 	return available
+}
+
+// RenderRequest asks for one page of a source document as an image.
+type RenderRequest struct {
+	Path string `json:"path"`
+	// Page is 1-based, matching the page_num every chunk carries.
+	Page int `json:"page"`
+	// DPI defaults to the sidecar's own choice (110) when zero.
+	DPI int `json:"dpi,omitempty"`
+	// BBox crops to a chunk's box, in PDF points (the same units chunk bboxes
+	// use). Empty renders the whole page, which is what the UI overlay wants.
+	BBox []float64 `json:"bbox,omitempty"`
+	// MaxSide caps the crop's longest side in pixels, applied by lowering the
+	// DPI rather than resizing: image tokens cost the vision model prefill
+	// (82 tok/s, a third of its text rate), so rendering bigger than the caller
+	// needs is work thrown away. Zero means no cap.
+	MaxSide int `json:"max_side,omitempty"`
+}
+
+// Page is one rendered page of a source document.
+//
+// The sizes in POINTS are the load-bearing ones: a chunk's bbox is measured in
+// PDF points (chunking.Block.to_chunk), so the renderer scales a box by dividing
+// by WidthPT and HeightPT. The pixel sizes are informational. Image is the PNG
+// as base64 because this channel is line-delimited JSON.
+type Page struct {
+	Page     int     `json:"page"`
+	Pages    int     `json:"pages"`
+	DPI      int     `json:"dpi"`
+	WidthPT  float64 `json:"width_pt"`
+	HeightPT float64 `json:"height_pt"`
+	WidthPX  int     `json:"width_px"`
+	HeightPX int     `json:"height_px"`
+	Image    string  `json:"image"`
+}
+
+// Render renders one page of a source document.
+func (s *Service) Render(ctx context.Context, req RenderRequest, timeout time.Duration) (*Page, error) {
+	if req.Path == "" {
+		return nil, fmt.Errorf("render: path is required")
+	}
+	if req.Page < 1 {
+		return nil, fmt.Errorf("render: page is required and 1-based")
+	}
+
+	client, err := s.ensureClient()
+	if err != nil {
+		return nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultRenderTimeout
+	}
+
+	var page Page
+	if err := client.Call(ctx, "render", req, &page, timeout); err != nil {
+		return nil, err
+	}
+	return &page, nil
 }
 
 // Close shuts the sidecar down.

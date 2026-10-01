@@ -7,7 +7,9 @@
 - **解析**：Python Sidecar（PyMuPDF；PP-DocLayout / TSR 为后续接入点）
 - **推理**：llama.cpp Sidecar（Laya 路由/充分性检查 + 生成 LLM + BGE-M3 嵌入）— 未接入
 - **存储**：内存分块索引 + 手写 BM25 / 余弦 / RRF 融合，落盘为**单个 JSON 文件**。
-  **没有数据库**：`go.mod` 零依赖，SQLite + sqlite-vec 只是 §3 的目标形态，尚未实现
+  **没有数据库**：SQLite + sqlite-vec 只是 §3 的目标形态，尚未实现
+- **编排**：顶层问答流程用 **eino**（`compose.Graph`）——见「问答编排（eino）」。
+  这是内核目前**唯一的第三方依赖**，构建需走镜像（见下方「依赖」）
 
 > 完整设计见 [`docs/plan.md`](docs/plan.md)。
 
@@ -18,7 +20,7 @@
 | Go 内核 + JSON-RPC 2.0 over stdio | ✅ 已验收 | `internal/ipc` |
 | 解析 Sidecar（PyMuPDF 管线） | ✅ 已验收 | 版面块检测、表格转 Markdown、按块分块 |
 | 版面分析（PP-DocLayout ONNX） | ✅ 已接入 | `sidecar/layout_onnx.py`，加速器优先；可视化 `scripts/visualize_layout.py` |
-| 分块与超短块合并（§5.3 / §5.3.1） | ✅ 已验收 | 类型豁免 → 合并 → 软挂靠 → 丢弃 |
+| 分块合并（§5.3 / §5.3.1） | ✅ 已验收 | TUIrag 策略 B：标题归组 Section → 段落缓冲 → 表/图合并 Caption → 碎片丢弃 |
 | Go ↔ Python Sidecar 桥接 | ✅ 已验收 | `internal/sidecar` + `internal/parser` |
 | 分块索引与 **混合检索** | ✅ 已验收 | `internal/store`：BM25（CJK 二元切分）+ 密集 ANN（Qdrant）+ RRF 融合 |
 | 密集检索（BGE-M3） | ✅ 已接入 | `internal/embed`，OpenAI 兼容接口；无 key 时自动降级为纯关键词 |
@@ -28,10 +30,12 @@
 | **解析缓存** | ✅ 已验收 | `sidecar/cache.py`；重复解析 21.5s → 0.18s |
 | **模型存储去重** | ✅ 已验收 | `scripts/setup-ollama.sh` 硬链接；7.1 GB → 4.4 GB |
 | 检索工具面（§6.7） | ✅ 已验收 | `hybrid_search` / `grep_search` / `list_chunks` / `metadata_search` |
-| **模型驱动的工具选择** | ✅ 已验收 | 模型在 4 个工具里自选（§6.1 `ActionMaxTurns=8` 仍是预算上限）；未知工具名剔除、失败回退确定性计划 |
+| **每轮工具选择（Laya）** | ✅ 已接入 | 每轮把「问题 + 证据摘要 + 已试调用 + missing」发给 Laya，它在**确定性候选调用集**里选下一个（~100 ms）；Laya 不可用时回退模型规划 → 确定性计划。见「问答编排（eino）」 |
+| **问答编排（eino）** | ✅ 已接入 | `route`（Laya 判简单/复杂）→ 简单：单次 agentic pass；复杂：`decompose` → 并发 `fanout` → `synthesize` |
 | **Electron 桌面端（产品形态）** | ✅ 可用 | `desktop/`：文档列表 + 拖放/选择文件 + 提问 + 引用跳转 + 实时进度 |
 | **进度通知（JSON-RPC notification）** | ✅ 已接入 | `internal/ipc` 的 `Server.Notify`；`index` / `ask` 逐阶段上报 |
 | **文档管理 RPC** | ✅ 已接入 | `documents` / `forget` / `status` |
+| **分块检查器（原文 ↔ chunk 对应）** | ✅ 已接入 | `chunks` / `page`：左侧渲染原文某页并画 bbox 高亮，右侧列分块，两边点击互相定位。见「桌面端界面」 |
 | **安装器（electron-builder）** | ✅ 含随包 Python 运行时，安装即用 | `scripts/build-installer.sh`、`scripts/fetch-python-runtime.sh`；产出约 772 MB，见「打包安装器」 |
 | **模型下载（本地化）** | ✅ 已下载 | 4.39 GB，见「本地模型」 |
 | **生成 LLM 接入（Qwen3-4B）** | ✅ 已接入 | 经 Ollama / llama.cpp；不可达时降级为抽取式 draft |
@@ -59,7 +63,7 @@ freerag/
 │   ├── parse_server.py    # JSON-RPC 入口
 │   ├── pipeline.py        # PDF → 版面块 → chunk
 │   ├── layout.py          # 版面块检测（PyMuPDF 提供者）
-│   ├── chunking.py        # 分块与超短块合并
+│   ├── chunking.py        # 分块合并（TUIrag 策略 B）
 │   └── tests/             # 单元 + 集成测试
 ├── scripts/               # install-go.sh / acceptance.sh / 验收断言 / 版面可视化
 └── docs/plan.md           # 开发计划（设计依据）
@@ -82,6 +86,7 @@ python3 -m venv .venv314              # 需要 Python >= 3.10（PyMuPDF 为 cp31
 
 ```bash
 export PATH="$PWD/.toolchain/go/bin:$PATH"
+export GOPROXY=https://goproxy.cn,direct   # eino 依赖需走镜像，见「依赖」
 go build -o bin/freerag ./cmd/freerag
 
 # 交互：每行一个 JSON-RPC 请求
@@ -137,31 +142,60 @@ scripts/setup-ollama.sh             # 解包 Ollama 运行时并导入 GGUF
 
 内核从 **stdin 读、向 stdout 写** NDJSON 格式的 JSON-RPC 2.0 消息；日志全部走 **stderr**。
 
+**凡是作用于索引的方法都接受一个可选 `kb`**（知识库 id）。**省略即第一个知识库** —— 这既让改造前的脚本与 CLI 继续可用，也意味着"忘了传"的后果是**答案变窄**，而不是串到别的知识库去。每个此类响应都会回带 `kb`，所以调用方看得出实际作用于哪一个。
+
 | 方法 | 参数 | 说明 |
 | :--- | :--- | :--- |
 | `ping` | — | 存活检查 |
-| `version` | — | 内核版本、已索引 chunk 数、索引路径、Sidecar 配置 |
-| `parse` | `path`, `profile?`, `max_chars?`, `max_pages?` | 解析文档并返回 chunk（不入库） |
-| `index` | 同上 + `force?` | 解析并写入本地索引；**内容未变的文档自动跳过**（见「增量索引」），返回 `skipped` / `added` / `removed` / `indexed_total` |
-| `search` | `query`, `limit?` | BM25 关键词检索 |
-| `ask` | `question` | 运行 medium 模式 Agentic Loop，返回 draft / verdict / evidence / trace |
+| `version` | — | 内核版本、数据目录、知识库数量、Sidecar / 嵌入 / 生成模型配置。**不含索引数字**（那些属于某个知识库，见 `status`） |
+| `parse` | `path`, `profile?`, `max_chars?`, `max_pages?` | 解析文档并返回 chunk（不入库，不涉及知识库） |
+| `index` | 同上 + `force?`, `kb?` | 解析并写入该知识库；**内容未变的文档自动跳过**（见「增量索引」），返回 `skipped` / `added` / `removed` / `indexed_total` |
+| `search` | `query`, `limit?`, `kb?` | BM25 关键词检索 |
+| `ask` | `question`, `kb?` | 运行 medium 模式 Agentic Loop，返回 draft / verdict / evidence / trace |
 | `tools` | — | 返回当前模式的检索工具面（4 个工具的 JSON schema） |
-| `tool` | `name`, `arguments?` | 直接执行一次工具调用，不经过模型 |
-| `documents` | — | 列出已索引文档（md5 / 文件名 / 页数 / chunk 数 / 索引时间），供界面显示 |
-| `forget` | `md5` 或 `doc_id` | 移除一篇文档的 chunks、清单与向量 |
-| `status` | — | 各子系统健康状态（sidecar / 嵌入 / ANN / 生成模型），界面启动时调用 |
+| `tool` | `name`, `arguments?`, `kb?` | 直接执行一次工具调用，不经过模型 |
+| `documents` | `kb?` | 列出该知识库的已索引文档（md5 / 文件名 / 页数 / chunk 数 / 索引时间） |
+| `chunks` | `doc_id`, `kb?`, `page?`, `offset?`, `limit?` | 某文档的分块：chunk_id / 页码 / 块类型 / **bbox（页内 PDF 点坐标）** / 字数 / 文本；外加**每页块数**（供翻页箭头）与总数。`page` 只过滤列表，不过滤计数 |
+| `page` | `doc_id`, `page`, `kb?`, `dpi?` | 原文某页渲染成 PNG（base64）+ **页尺寸（pt）**。bbox 就是按 pt 度量的，前端拿它换算高亮框 |
+| `forget` | `md5` 或 `doc_id`, `kb?` | 移除一篇文档的 chunks、清单与向量 |
+| `status` | `kb?` | 各子系统健康状态（sidecar / 嵌入 / ANN / 生成模型）；索引部分属于指定的知识库 |
+| `kb.list` | — | 列出知识库（id / 名称 / 文档数 / chunk 数）。**不打开任何一个** |
+| `kb.create` | `name` | 新建知识库（只写注册表，空库不产生索引） |
+| `kb.rename` | `id`, `name` | 改名。**id 不变** —— 索引目录与 Qdrant 集合都以 id 命名，改名不该搬动数据 |
+| `kb.delete` | `id` | 删除知识库：登记 + 向量 + 索引目录。**最后一个不可删** |
+
+**知识库的隔离是结构性的**：每个库有自己的 `index.json` 和自己的 Qdrant 集合（`freerag_<id>`）。共用一个集合需要每次查询都带 payload 过滤，而**第一个忘记带的调用点**就会返回另一个库的段落 —— 那种泄露的结果看起来仍然合理，下游没有任何东西能发现。
+
+数据布局（`FREERAG_DATA` 覆盖目录，`FREERAG_KB_REGISTRY` / `FREERAG_KB_ROOT` 可单独覆盖）：
+
+```
+data/
+  kbs.json              注册表（列表 + 缓存的文档数）
+  kbs/<id>/index.json   每个知识库自己的索引
+  index.json            改造前的单索引文件，仅作为迁移来源保留
+```
+
+**升级不会看起来像丢了数据**：首次启动时，若注册表不存在而旧的 `index.json` 存在，它会被**复制**（不是移动）成第一个知识库「默认知识库」。原文件保留在原地 —— 万一迁移的判断有误，还有东西可以回退。
 
 **进度通知**：`index` 与 `ask` 会先发若干条**无 `id` 的 JSON-RPC 通知**，同一条流上，然后才是响应：
 
 ```json
 {"jsonrpc":"2.0","method":"progress","params":{"stage":"parse","file":"paper.pdf"}}
-{"jsonrpc":"2.0","method":"progress","params":{"stage":"parsed","pages":38,"chunks":203,"layout":"pp-doclayout"}}
+{"jsonrpc":"2.0","method":"progress","params":{"stage":"draft","delta":"这门课的"}}
 {"jsonrpc":"2.0","id":1,"result":{"added":203,"indexed_total":203}}
 ```
 
-`stage` 取值：`hash` / `skipped` / `parse` / `parsed` / `stored` / `persisted` / `agent`。
+`stage` 取值：`hash` / `skipped` / `parse` / `parsed` / `stored` / `persisted` / `agent` / `thinking` / `draft`。
 **任何客户端都必须按 `id` 是否为 null 区分**：没有 `id` 的是事件，不是"忘了对应的响应"。
 （`index` 约 30 s、`ask` 可达 280 s —— 没有这个通道，界面就只有一个永不变化的转圈。）
+
+三个 stage 属于**某一次提问**，界面把它们渲染在那条消息里，而不是全局状态条上：
+
+- `thinking` —— 在第一次模型调用**之前**发出，那是最长的静默段（60–70 s）。它同时喂给外壳的闲置超时（内核来的任何消息都会重置该时钟）。
+- `agent` —— 每一步的工具调用与结果，`params.line` 是可直接显示的一行。
+- `draft` —— **答案本身**的分片。界面在流结束后**整体替换**为带引用链接的版本：分片边界可能落在一个引用标记或标签中间，所以流式期间只能按纯文本写入。
+
+其余的 stage 都属于**索引流程**，没有对话可归属，仍然进全局状态条。
 
 示例：
 
@@ -219,10 +253,56 @@ skipped=False  added=42  removed=28   28 stale chunk(s) replaced, 42 added
 | `FREERAG_NUM_CTX` | `8192` | 上下文窗口。**必须显式设置**：Ollama 默认 4096，小于 Agentic 循环拼出的证据块，超长 prompt 会被拒绝（HTTP 400）而不是截断 |
 | `FREERAG_THINK` | 空（**关闭**） | Qwen3 的推理模式。见下方「推理模式为什么默认关闭」 |
 | `FREERAG_KEEP_ALIVE` | `30m` | 模型在显存中的保留时长。Ollama 自己的默认是 5 分钟，短于一个人读完答案再问下一个的间隔 |
+| `FREERAG_VLM_MODEL` | 空（**关闭**） | **解析期**视觉模型名（如 `qwen2.5vl:3b`，**必须非推理**）：给 `Figure` 区域生成文字描述。空 = 不做。见下方「解析期视觉（图表 → 文字）」 |
 | `FREERAG_LAYOUT_THREADS` | `1` | 版面模型的 CPU 线程数（增多会更慢） |
 | `FREERAG_LAYA_DIR` | `models/laya-onnx` | Laya ONNX 目录 |
 | `FREERAG_LAYA_THREADS` | `1` | Laya 的 CPU 线程数。**实测 1 线程 104ms vs CoreML 434ms**，与版面模型相反 |
 | `FREERAG_CACHE_DIR` | `cache/parse` | 解析缓存目录 |
+
+## 解析期视觉（图表 → 文字）
+
+`Figure` 区域**没有文字层**，所以它本来只能靠 caption 被检索到。设 `FREERAG_VLM_MODEL=qwen2.5vl:3b`
+后，解析时会把每个 Figure 按 bbox 裁剪成 PNG 交给该视觉模型，把描述写进块正文，于是图也能像
+普通段落一样被检索（实现见 `sidecar/vlm.py`）。
+
+### ⚠️ 必须用**非推理**视觉模型
+
+实测（Ollama 0.34.4，同一张流程图裁剪，`temperature=0`）：
+
+| 模型 | dpi | 耗时 | `thinking` | 描述正文 |
+| :--- | ---: | ---: | ---: | :--- |
+| **`qwen2.5vl:3b`** | 150 | **25.7s** | 0 字 | 104 字 ✅ |
+| **`qwen2.5vl:3b`** | 100 | **21.8s** | 0 字 | 85 字 ✅ |
+| `qwen3-vl:4b` | 100 | 55.6s | 466 字 | **0 字（空）** ❌ |
+| `qwen3-vl:4b`（`bench_vlm.py` 全量 11 张） | — | **213s/张** | 大量 | 慢且不稳定 |
+
+**`qwen3-vl:4b` 不可用**：Ollama 忽略 `"think": false`，它永远推理；推理与正文共用
+`num_predict`，预算被推理吃光后**正文为空** —— 与生成模型踩过的坑完全同一个
+（见「问答延迟」一节）。`sidecar/vlm.py` 因此会在收到「只有 reasoning、没有 content」时
+**打 warning**，而不是静默写一个空 chunk。
+
+> 每张图约 22s、每篇最多 12 张，所以一篇带 7 张图的论文首次索引约 **+2.5 分钟**；
+> 结果进解析缓存（缓存键含模型名），重复索引为 0。
+
+**已知残留（实测）**：提示词要求「不要引用任何具体数值」，但 `qwen2.5vl:3b` 仍会写
+（实测一条描述里出现 `κ = 0`、`H(x) = 0.52`、`A3`）。更大的 `qwen3-vl:4b` 指令遵循更好，
+但它在本机不可用（见上表）。目前**不做事后过滤**：数字清洗的边界（`A3` 是分类标签还是数值？
+`Figure 1` 呢？）不适合用正则一刀切，宁可在描述前保留原样式。真要保证「索引里没有数值」，
+正确做法是加一道可配置的后处理，而不是指望模型遵守。
+
+**只在解析阶段用，问答阶段绝不用。** 生成模型与一个 ~3.5 GB 的视觉模型不能同时驻留——本机
+16 GB 且已实测在换页（§「问答编排」）。因此：
+
+| 行为 | 说明 |
+| :--- | :--- |
+| **索引 ⟂ 问答 互斥** | 每个知识库一把 `RWMutex`：索引独占（`index` / `index_batch` 全程），问答共享（可多个并发）。索引进行中发起的提问会**等待**，反之亦然 |
+| **索引任务结束即卸载** | `index` 完成、或 `index_batch` 整个作业结束后，内核用 `keep_alive: 0` 让 Ollama 立刻卸载该视觉模型（`agent.UnloadModel`） |
+| 失败不致命 | 裁剪失败 / 调用失败 / 超时的**单个图**保持原样，不影响整篇解析；卸载失败只记日志（模型会按自己的 keep-alive 过期） |
+| 每个文档最多 12 张图 | `MIN_FIGURE_POINTS`/`DEFAULT_MAX_FIGURES`，避免一个异常文件把解析变成上百次模型调用 |
+
+> ⚠️ 改了 `vlm.py` 的提示词或裁剪逻辑**必须 bump `sidecar/cache.py` 的 `CACHE_VERSION`**，
+> 并且注意视觉模型名已纳入缓存键——换模型会产生不同的 caption，缓存不能跨模型命中。
+> 既有的索引里 Figure 块没有描述，需要 `force: true` 重新索引才能补上。
 
 密集检索（可选，见下方"嵌入模型"）：
 
@@ -257,8 +337,28 @@ skipped=False  added=42  removed=28   28 stale chunk(s) replaced, 42 added
 端到端（同一份索引、同一个问题）：
 
 ```
-启动后第一次提问   113s → 15.4s
+关推理前  113s（首次提问）
+关推理后  15.4s   （答案 147 字符，"two to four sentences"）
+改详尽后  83s     （答案 646 字符，4.4× 长）
 ```
+
+**答案长度完全由 `draftSystemPrompt` 决定**，而且只有它决定 —— `num_predict` 是上限（实测最多用到 296），`MaxDraftChars` 是截断（从未触发），两者都没有真正塑造过答案。同一问题、同一证据、只换系统提示：147 → 315（去掉长度指令）→ 537（要求详尽）字符。
+
+> ⚠️ **但"更长"当前有一部分是空话，原因不在 prompt。** 实测那次详尽回答引用的 6 条证据**全部短于 120 字符，其中 5 条就是标题**（`一、考核目的` 6 字符、`重点考核：` 5 字符、`三、交付要求` 6 字符）。
+> 模型被要求写出 646 字符的详尽答案，而手头只有约 135 字符的实质内容 —— **它只能靠重复凑**。
+>
+> 根因是**分块**：索引里 1302 个 chunk 中有 **164 个 `Title` 块，平均 27 字符**，而标题逐字包含查询词，所以检索会**优先**返回它们。这不是调 prompt 能修的，需要让标题并入其后的正文块（见 §0.1）。
+
+**流式输出**：`ask` 期间答案以增量事件逐步推送，前端边收边渲染（写完再换成带引用跳转的版本）。
+
+```
+t=  6s   draft 增量= 11 个   累计  18 字符
+t= 18s   draft 增量= 86 个   累计 161 字符
+t= 42s   draft 增量=237 个   累计 431 字符
+t= 66s   draft 增量=360 个   累计 646 字符   ← 结束
+```
+
+> 流式下**不能对每个分块单独剥离 `<think>`**：Ollama 按自己的边界切分，`<thi` 和 `nk>推理` 可能落在不同块里，逐块正则两半都不匹配，用户的答案前面就会被打印出模型的私有推理。`thinkFilter` 因此会**少量回退**：只压住可能是标签开头的几个字符，普通文本照常立即输出（实测 8 个用例，含跨块、三分块、未闭合、`a < b` 这类普通尖括号）。
 
 **启动预热**（内核在后台发一个与 tool-planning 同前缀的请求）：
 
@@ -335,8 +435,13 @@ BGE-M3（1024 维）。
 
 ```bash
 cp .env.example .env          # 填 FREERAG_SILICONFLOW_KEY，.env 已被 gitignore
-set -a && . ./.env && set +a
+set -a && . ./.env && set +a  # 直接跑内核时需要；桌面端 npm start 会自动加载
 ```
+
+> 桌面端（`desktop/main.js` 的 `loadDotEnv`）启动时会读**仓库根目录**的 `.env` 并下发给内核，
+> 所以 `npm start` 不必手动 source。`process.env` 优先于文件，显式 export 不会被覆盖；
+> 内核单独运行时仍按上面两行 source。忘了这一步的失败形态是**静默**的——内核只打一行
+> `dense retrieval disabled`，`hybrid_search` 退化成纯关键词，症状只是答案变差。
 
 > ⚠️ **这与 docs/plan.md §1「完全本地化、安装即用」的目标冲突**：托管嵌入需要联网、按量计费，
 > 并且**会把文档分块原文发往第三方**。面向私有文档发布时必须换成本地 provider
@@ -404,17 +509,151 @@ echo '{"jsonrpc":"2.0","id":1,"method":"version"}' | ./bin/freerag 2>/dev/null \
 > 小语料下若点数低于 Qdrant 的建索引阈值，它会**自动做精确检索**——小库下这反而最快，
 > 因此无需特判，小库的 `recall@10` 天然是 1.0。
 
+## 问答编排（eino）
+
+`ask` 的顶层流程是一张 **eino `compose.Graph`**（`internal/agent/flow.go`）。它取代了原来「直接跑一个 agentic 循环」的入口：
+
+```
+START → route ─(simple)→ rag ──────────────────────────────→ END
+              └(complex)→ decompose → fanout → synthesize → END
+```
+
+- **route**：把问题交给 Laya 判**简单 / 复杂**（`Decide` 的二选一，~100 ms）。Laya 不可用时退化为确定性启发式（`internal/agent/router.go`）。
+- **简单** → `rag`：直接跑一次 `Loop.Run`，只有一次 agentic pass。
+- **复杂** → `decompose`：生成模型把问题拆成至多 4 个**互相独立**的子问题（JSON 数组；解析失败则退回原问题）。
+- **fanout**：每个子问题**并发**跑一次 agentic 循环，各自独立检索。
+- **synthesize**：生成模型把子答案合并成最终答案，**流式**输出。子循环的答案不流式——`fanout` 给每个子循环一份 `OnDraftDelta = nil` 的副本，否则会把「答案的一部分」当成整个答案发布出去。
+
+> eino 的 `compose.Graph` **不支持环**，也没有 `Map` 原语：所以「轮次循环」仍留在循环内部、作为图里的一个节点；动态 N 路 fan-out 用节点内并发（子问题数来自 `decompose`，没有静态的 `Parallel` 分支可用）。
+
+### 每轮由 Laya 决定下一个工具调用
+
+**Laya 是非生成式决策模型 —— 它只能对给定选项打分取 argmax，不能生成工具参数。** 所以「让它决定工具调用」实现为：循环每轮确定性地构造一组**可执行的候选调用**（`internal/agent/toolchoice.go`），Laya 只负责选一个：
+
+| 候选 | 参数来自 |
+| :--- | :--- |
+| `search("…")` | 原问题、最近一次 rewrite 的 query |
+| `grep("…")` | SCA 报告的 missing 词（最多 2 个） |
+| `read("doc.pdf")` | 证据池里已出现的 doc_id（最多 2 个） |
+| `stop` | 证据已足够，不再检索 |
+
+收益正是替换掉原来每轮 ~40 s 的「工具规划」模型调用（≈100 ms），而且**候选集不可能包含编造的值**——模型把 `author_zhao_hui` 当 doc_id 那类事故在候选集里根本不存在。已试过的调用会被剔除，因此不会重复。
+
+回退顺序：**Laya 选工具 → 模型规划（`toolPlanSystemPrompt`）→ 确定性 `roundCalls`**。工具提示按 RAGFlow 的 `action_run.md` 精简过，只保留 freerag 真实存在的 4 个工具（去掉了 `navigate_*` / `graph_explore` / `calculate` / `web_search`）。
+
+### 依赖
+
+引入 eino 打破了原先「`go.mod` 零依赖、离线可构建」的状态：现在多出约 27 个间接依赖，`go build` 需要能访问模块代理。本网络下 `proxy.golang.org` 不可达，走镜像：
+
+```bash
+export GOPROXY=https://goproxy.cn,direct
+go build -o bin/freerag ./cmd/freerag
+```
+
 ## Agentic 工具选择
 
 medium 模式的循环（§6.1）把**选哪些工具**交给生成模型：每轮先问一次「为这个问题该调哪些工具」，
 模型从 §6.7 的 4 个工具里自选；内核执行后把结果并入证据池，再由 Laya 判充分性。
 
 ```
-[Action Session] the model chose 1 call(s): metadata_search(block_type=Table page=3)
-[Tool] metadata_search(block_type=Table page=3) -> +1 passage(s). 1 chunk(s) matched the filter
-[RAGAgent] Round 1: +1 passage(s); pool now 1.
+[Action Session] the model chose 1 call(s): metadata_search(filters=[key:indexed_at op:start with value:2026-09-29] logic:and)
+[Tool] metadata_search(...) -> +3 passage(s). 3 chunk(s) from 1 document(s) matched indexed_at start with 2026-09-29 and
+[RAGAgent] Round 1: +3 passage(s); pool now 3.
 [SCA] Round 1 verdict=SUFFICIENT (missing=0).
 ```
+
+### 循环的四条不变式
+
+这四条都**不是"提示模型做对"，而是循环自己保证**：
+
+| 不变式 | 为什么不能交给模型或 checker |
+| :--- | :--- |
+| **空证据池永不判充分** | checker 被问的是"这份草稿有没有回答问题"，而"证据里没有"的草稿**确实回答了**——实测 Laya 给 **0.93** 置信度的 sufficient。它没答错，是**问错了**："看没看过语料"这个事实住在 `len(evidence)` 里，而 §6.6 刻意不让 checker 看到证据。守卫因此放在 `Loop.Run`（evidence 在作用域内），空池直接判 `INSUFFICIENT` 且**不咨询 checker** |
+| **"已试过什么"进下一轮提示词** | 系统提示词早就写着"不要重复已做过的调用"，但**从没说过那些调用是什么**。证据为空时这个遗漏正好致命：那时提示词里没有别的线索，"刚返回 0 的那个调用"就是最可能的下一个动作 |
+| **完全相同的重复调用被拒绝** | 实测：提示词把该调用列出来并标注 `returned nothing`，模型第 3 轮**照样重复**。一次 run 内索引不变，重复不可能带来新信息——所以由 loop 在**预算检查之前**拒掉它 |
+| **答案只在循环结束后写一次** | 每轮的草稿是给 checker **判**的**提案**，可能被否决、要求再来一轮。边写边发到答案区，就是"答案改主意"：第一轮没检索到就流出"证据无法回答"，下一轮把它换掉。所以草稿**不流式**（`draft`），循环结束后 `answer` 写一次并流式输出 |
+
+> `CoverageChecker`（无模型时的备用件）一直有第一条的守卫；`LayaChecker`（实际在跑的）没有。守卫现在在 `Loop.Run` 里，两条路径都覆盖。
+
+**答案与草稿的分工**（`internal/agent/loop.go`）：
+
+```
+循环：检索 → draft（给 checker 判，不输出）→ 判定
+        ↓ 判定不足则重来；充分或轮数用尽则退出
+循环结束 → answer（写一次，流式输出）
+```
+
+实测事件顺序（`test1` 库，3 轮问答）：
+
+```
+Round 1  metadata_search -> +0     [Draft] skipped: no evidence to draft from.
+         [SCA] Round 1 verdict=INSUFFICIENT (no evidence to judge; the checker is not asked)
+Round 2  hybrid_search -> +6       [SCA] Round 2 verdict=INSUFFICIENT (missing=6)
+Round 3  metadata_search（重复）→ 被拒    [SCA] Round 3 verdict=SUFFICIENT
+         ↓ 循环结束
+         >>>>>> 答案开始流出 <<<<<<
+```
+
+流出的 **733 字符 == `Result.Draft` 的 733 字符** —— 屏幕上那段文字就是最终答案，不流式输出任何会被撤回的东西。
+
+**实测代价**（`test1` 库，3 轮问答，含计时 trace）：
+
+| 阶段 | 耗时 |
+| :--- | ---: |
+| Round 2 的判定草稿 | 37.1 s |
+| Round 3 的判定草稿 | 38.8 s |
+| 循环结束后的答案 | 41.4 s |
+| **总计** | **164 s** |
+
+改造前这 3 轮只需 **2 份**生成（最后一轮的草稿**兼**答案），约 76 s 生成；
+新结构是 **3 份**，多一次完整生成（**+41.4 s，约 +35%**）。
+1 轮问答（最常见情形）则是 1 份变 2 份，**接近翻倍**。
+
+这一份不是重复劳动——判定草稿写于某一轮的证据快照、目的是"能否回答问题"；答案写于**定稿证据池**、目的是"给人读"。
+但**要把 N 份降到 1 份，正确做法是让 checker 直接判证据而不是判草稿**（§6.6 的改动），而不是砍掉写答案这一步。
+
+实测（`test1` 库，原问题「赵慧为作者的论文有哪些，讲了啥」）：
+
+```
+改前   rounds=1  evidence=0  verdict=SUFFICIENT（假的：空池被当成了充分）
+改后   rounds=2  evidence=6  verdict=SUFFICIENT（真实判定：非空池上 Laya 判充分）
+```
+
+改后的草稿会列出论文与共同作者，但**检索质量仍有残留**：中文问「赵慧」而语料是英文（署名 `Hui Zhao`），
+`hybrid_search` 返回的 6 条里混有标题页碎片，草稿会把 `Introduction` 当成论文标题。
+那是**跨语言召回质量**问题，与循环结构无关。
+
+### `metadata_search`：只有两个字段
+
+[`internal/store/metafilter.go`](internal/store/metafilter.go) 里**硬编码**两个可过滤字段，`key` 的 enum 也只列它们：
+
+| 字段 | 含义 | 取值来源 |
+| :--- | :--- | :--- |
+| `doc_id` | 文档 id（源文件名） | **chunk 自身的 DocID**，不是清单 —— 有 chunk 却没清单记录的文档也必须能过滤到 |
+| `indexed_at` | 装入时间，`YYYY-MM-DD HH:MM:SS` | 清单的 `DocumentRecord.IndexedAt`；缺失则留空 |
+
+算子沿用 RAGFlow 的一整套（`=` `≠` `>` `<` `≥` `≤` `in` `not in` `contains` `not contains` `start with` `end with` `empty` `not empty`），语义逐条对齐它的内存实现。
+
+**时间必须用 `start with`**，这是 RAGFlow 对自身时间字段的规则，我们原样照搬：
+
+```
+indexed_at 存的是 "2026-09-29 14:26:01"，所以
+  要一天 → op "start with" + "2026-09-29"   ✅
+  用 "="  + "2026-09-29"                     ❌ 永远匹配不上（存的是完整时间戳）
+  用 "="  + "2026-09-29 14:26:01"            ✅ 但要求秒级精确
+```
+
+**未知字段与"合法空结果"是两句不同的话。** 这一条是那次事故的直接修复：
+
+| 情形 | 返回 |
+| :--- | :--- |
+| 字段不存在（`author`） | 拒绝，并列出真实字段与可用取值：`metadata field(s) [author] do not exist ... It has exactly two: doc_id, indexed_at. Available: ...` |
+| 算子不存在 | 拒绝，并列出全部算子 + `start with` 的时间提示 |
+| 字段与算子都对，但没匹配到 | 明确说明"这是关于**过滤器**的陈述，不是关于语料的"，并把真实 doc_id 列出来 |
+
+规划提示词里还有一段 **AVAILABLE METADATA**，列出两个字段**实际存在的取值**（值 + 覆盖文档数），
+结尾一句取自 RAGFlow：*"Values NOT listed here do not exist — never invent one."*
+—— 因为枚举字段名挡不住编造**取值**，而那次事故编的正是取值。
 
 回退是内建的，而且**每条都写进 trace**，不会静默降级：
 
@@ -466,13 +705,78 @@ scripts/download-models.sh laya       # ~1.7 GB，若尚未下载
 
 ## 桌面端界面
 
-`desktop/` 是可用的文档问答界面，不再是 RPC 调试台：
+`desktop/` 有两个视图，共用一条顶栏（品牌 / 视图切换 / 健康芯片）：
+
+**知识库视图** —— 管理"能问什么"，分两级，与问答视图同形。
+
+*知识库选择页*（**每次进入知识库页都落在这里**）：
 
 | 区域 | 内容 |
 | :--- | :--- |
-| 顶栏 | 健康状态芯片：Ollama / ANN 后端 / 嵌入配置 / sidecar |
-| 左栏 | 文档列表（页数、chunk 数、索引时间）；支持**拖入 PDF** 或「添加」选择文件；悬停可「移除」 |
-| 主区 | 提问框（回车发送）、进度（实时阶段 + 内核 trace）、答案（引用 `[n]` 可点击跳转到对应证据） |
+| 顶部 | 「新建知识库」 |
+| 列表 | 知识库卡片：名称、文档数与 chunk 数、创建日期 |
+
+*知识库内*：
+
+| 区域 | 内容 |
+| :--- | :--- |
+| 左栏 | 「← 返回」、「重命名」/「删除」、库名与统计、**拖入 PDF** / 「添加文档」、文档列表（页数、chunk 数；点选即打开分块） |
+| 主区 | **分块检查器**（见下） |
+
+**分块检查器** —— 一块 chunk 和它来自的那片原文，是同一个事实的两种说法：
+
+| 区域 | 内容 |
+| :--- | :--- |
+| 左 | **原文页面**：sidecar 用 PyMuPDF 渲染成 PNG，上面按 bbox 叠加高亮框。翻页箭头 + 「显示本页全部框」 |
+| 右 | 该文档的**分块列表**：chunk_id / 块类型 / 页码 / 字数 / 文本（选中那块的文本展开，其余折到 3 行）。「只看本页」 |
+
+**两边点击互相定位**：点右侧某块 → 左侧自动翻到它所在的页并高亮它的框；点左侧的框 → 右侧选中并滚到对应卡片。**翻页是选择的一部分，不是单独一步** —— 一个在第 7 页的 chunk 却在第 1 页上高亮不出任何东西，正是这个界面要防止的事。
+
+**为什么原文在 sidecar 里渲染而不是直接嵌 PDF 阅读器**：bbox 是按 **PDF 点**（`page.rect` 空间、左上原点）度量的，所以页尺寸（pt）随图一起返回，前端只做百分比换算 —— **一个坐标系**，Electron 侧永远不用打开 PDF。框用百分比而非像素，缩放窗口时框跟着图走，不需要任何 resize 监听。见 `sidecar/parse_server.py` 的 `method_render` 与 `desktop/renderer/app.js` 的 `renderBoxes`。
+
+**整篇分块一次取回**：`chunks` 返回该文档的全部分块，所以翻页与「只看本页」都是**本地重渲染**，不等内核 —— 翻页真正需要的是一张渲染好的页图，而不是另一份列表。
+
+**文件被移走时会明说**：原文路径来自索引时的清单记录。文件不在了就显示「原文无法显示：…」，而不是把高亮框压在空白页上 —— 后者看起来像数据坏了，而不是文件没了。
+
+**进入知识库页也一定落在选择页**，理由与问答视图相同：上次在哪个库，不是"现在要往哪儿放文件"的答案。
+
+## 主题（白昼 / 黑夜）
+
+顶栏右侧有切换按钮。组件从不写颜色，只写角色（`--panel` 表示"抬升于页面之上的面"），十六进制值只出现在 `styles.css` 的两处调色板里。
+
+**浅色不是深色反相。** 反相会得到 `#3fb950` 的绿，在白底上是 1.9:1 对比度——当文字读不了、当细线看不见。两套配色的实际取值都是对着它所在的面选的。
+
+**唯一不随主题变的一组颜色**是原文页上的高亮框。它压在白纸上，跟着调色板走会在深色主题里被调成"对近黑背景可见"、然后在白纸上消失。所以 `--box-*` 只在 `:root` 定义一次、浅色主题不覆盖。
+
+**主题从哪来**（`main.js` 的 `resolveTheme`）：`FREERAG_THEME` 覆盖 → `prefs.json` 里存的选择 → 操作系统。环境变量排第一是因为截图与测试要能钉住主题而不管机器上选了什么，**且它不写回文件**。最后一档兜底是"从没选过的人"——把浅色机器开成黑窗口，是替他们做的一个错决定。
+
+**界面调用的接口**是 `window.freeragTheme`（`list` / `current` / `set` / `toggle`）。按钮和 DevTools 控制台走同一条 API，"校验名字 → 应用 → 持久化 → 写失败要报错"只写一遍。
+
+**防闪白**分两半：窗口 `backgroundColor` 按主题设，preload 从 `process.argv` 读主题并在 `<html>` 出现时立刻写上 `data-theme`。走 IPC 就晚了——它
+
+**问答视图** —— 管理"问过什么"，分两级。
+
+*会话选择页*（**每次进入问答页都落在这里**）：
+
+| 区域 | 内容 |
+| :--- | :--- |
+| 顶部 | 「新建会话」 |
+| 列表 | 会话卡片：名称、对话数与消息数、它绑定的知识库、悬停可删 |
+
+*会话内*：
+
+| 区域 | 内容 |
+| :--- | :--- |
+| 左栏 | 「← 返回」、会话名与绑定知识库、「新建对话」、该会话的对话历史 |
+| 右栏 | 消息记录与提问框（回车发送，Shift+回车换行） |
+
+**为什么进入时一定落在选择页**：上次你待在哪个会话，不是"现在想问什么"的答案 —— 静默恢复它，正是问题被打进错会话的方式。会话内**刻意不再显示会话列表**：那会给出两条改变"当前在哪个会话"的路径，而返回键已经是其中一条。
+
+**每次提问的工具调用轨迹显示在这条消息里，不在全局状态条上。** 它回答的是"这个答案是怎么来的"，那是读完答案之后的问题 —— 放在对话里，它会留在原地、跟着会话一起保存；放在状态条上，下一件事发生时就没了。生成过程中它是**展开**的（此时它是唯一的进度信号），答完自动**折叠**成「检索与推理 N 步」，不把答案挤出屏幕。消息头另外记录该次提问的耗时。
+
+**会话在创建时绑定一个知识库，之后不可更改。** 允许更改等于让同一个会话里的历史答案被重新解读 —— 它们引用的段落来自另一个索引。知识库被删除后，会话仍可翻阅，但不能再提问（提问会从空索引里检索，看起来像提问本身失败）。
+
+**会话与对话历史由外壳（`desktop/main.js` → `chats.json`）保存，不在内核里。** 它是一串问答记录，检索链路的任何环节都不读它；放在外壳意味着这份文件只有一个写入方，也不必为内核从不接触的数据新增 RPC。写入用临时文件 + rename —— 这是全部对话的唯一副本，写到一半崩溃会留下一个解析不出任何东西的文件。历史损坏时**报告而不是覆盖**：手工还能救回来，静默清空则看起来像对话从未存在过。
 
 ```bash
 go build -o bin/freerag ./cmd/freerag     # 界面需要内核
@@ -480,10 +784,10 @@ cd desktop && npm start
 
 # 截图（开发/CI 用，不触发录屏权限弹窗）：
 FREERAG_SCREENSHOT=/tmp/ui.png npm start
+FREERAG_SCREENSHOT=/tmp/chat.png FREERAG_SCREENSHOT_VIEW=chat npm start
 ```
 
-> **草稿是转义后才插入 DOM 的。** 它来自一个读过文档的语言模型，而文档本身也可能含标记；
-> 按 HTML 处理等于允许文档往应用里注入脚本。
+> **答案在流式期间是按纯文本写入的，只有流结束后才转成 HTML。** 它来自一个读过文档的语言模型，而文档本身也可能含标记；按 HTML 处理等于允许文档往应用里注入脚本。流式还多一层：分片边界可能落在一个标签或引用标记中间，**逐片转义也拦不住** —— 只有把整个答案拼起来才知道。所以流式用 `textContent`，结束后再由 `renderMessages()` 整体替换。
 
 界面在**订阅之外还会主动拉一次 `status`**：内核早于窗口启动，它的首次状态广播发生在页面脚本加载之前，
 只订阅会让状态栏永远停在"连接中"。

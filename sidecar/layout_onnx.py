@@ -15,7 +15,8 @@ PyMuPDF providers share one code path — that is what keeps the two swappable.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Sequence, Tuple
+import threading
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -119,12 +120,7 @@ LABEL_TO_BLOCK_TYPE = {
     "equation": "Equation",
 }
 
-#: Accelerator providers, in preference order. CPU is always appended last.
-#:
-#: Measured on an Apple M-series / 10 cores, one 1024x1024 page:
-#:   CoreML 0.17s  |  CPU 1.9s (1 thread) .. 7.8s (default threads)
-#: CoreML was verified to return byte-identical detections to the CPU provider,
-#: so preferring it is a pure speed win when present.
+#: Accelerator providers, in preference order, when they are asked for.
 ACCELERATOR_PROVIDERS = (
     "CoreMLExecutionProvider",
     "DmlExecutionProvider",
@@ -132,22 +128,159 @@ ACCELERATOR_PROVIDERS = (
     "OpenVINOExecutionProvider",
 )
 
-#: CPU intra-op threads when no accelerator exists.
+#: CPU intra-op threads. The default and the value used unless overridden.
 #:
 #: Counter-intuitive but measured: this model's ops do not parallelise, so extra
 #: threads only add contention — 1/2/3/4 threads took 1.9/3.7/5.4/7.4 s per page.
 #: Overridable with FREERAG_LAYOUT_THREADS for a machine that behaves otherwise.
 DEFAULT_CPU_THREADS = 1
 
+#: Which providers to run on: "cpu" (default), "auto", or an explicit list.
+#:
+#: CPU is the default because of how the pipeline pays for a session. Measured on
+#: a MacBook Air M5 / 10 cores, 3 real corpus PDFs (8 pages), same code path:
+#:
+#:   CoreML: 7.0s session + 0.25s/page = 7.70s per document
+#:   CPU:    0.1s session + 2.04s/page = 5.53s per document
+#:
+#: CoreML is roughly 8x faster per page (0.25s vs 2.04s) and returns
+#: byte-identical detections, yet it loses by 1.4x at document granularity,
+#: because its ~6.9s model compile is charged to every SESSION and a session is
+#: created per document (see LayoutDetector._load). It also serialises: four
+#: concurrent processes each compiling the same model queued on the one shared
+#: compiler service and took 4x the wall time of one, for 836 MB each.
+#:
+#: The session now DOES outlive a document (`session_for` below), and the
+#: prediction was measured on the 60-document corpus (234 pages, no cache):
+#:
+#:   CoreML 505.6s -> 85.9s (1.43s/document)   <- what the cache bought
+#:   CPU    539.2s -> 539.2s (8.99s/document)  <- CPU's session was 0.14s, so
+#:                                                the cache has nothing to save
+#:
+#: So with caching in place CoreML is 6.3x faster than CPU, and "auto" is the
+#: configuration to want. "cpu" is still the default only because it was asked
+#: for explicitly; flipping it is this line. The CPU path remains the fallback
+#: for machines without an accelerator, where it is the only option anyway.
+#: FREERAG_ONNX_PROVIDERS overrides it per run, e.g. "auto" or
+#: "CoreMLExecutionProvider,CPUExecutionProvider" for a like-for-like comparison.
+DEFAULT_PROVIDER_CHOICE = "cpu"
+
+
+def provider_choice() -> str:
+    """The raw FREERAG_ONNX_PROVIDERS setting, or the default."""
+    return os.environ.get("FREERAG_ONNX_PROVIDERS", DEFAULT_PROVIDER_CHOICE)
+
 
 def default_providers() -> List[str]:
-    """Available accelerators first, CPU last."""
+    """The provider list to hand onnxruntime, resolved from the setting.
+
+    Shared with the table-structure model (tsr_onnx), which reads the same
+    setting on purpose: both are deepdoc models with the same startup cost, so a
+    machine that wants one on CPU wants the other there too.
+    """
     import onnxruntime
 
     available = set(onnxruntime.get_available_providers())
-    ordered = [name for name in ACCELERATOR_PROVIDERS if name in available]
-    ordered.append("CPUExecutionProvider")
+    choice = provider_choice().strip()
+
+    if not choice or choice.lower() == "cpu":
+        return ["CPUExecutionProvider"]
+
+    if choice.lower() == "auto":
+        ordered = [name for name in ACCELERATOR_PROVIDERS if name in available]
+        ordered.append("CPUExecutionProvider")
+        return ordered
+
+    # An explicit list: honour both the membership and the order given, dropping
+    # anything this build of onnxruntime cannot provide, and always ending on CPU
+    # so inference still has somewhere to run.
+    names = [name.strip() for name in choice.split(",") if name.strip()]
+    ordered = [name for name in names if name in available]
+    if "CPUExecutionProvider" not in ordered:
+        ordered.append("CPUExecutionProvider")
     return ordered
+
+
+def make_session_options(providers: Sequence[str], cpu_threads: int) -> Any:
+    """SessionOptions for a provider list, applying the measured CPU settings."""
+    import onnxruntime
+
+    options = onnxruntime.SessionOptions()
+    if providers[0] == "CPUExecutionProvider":
+        options.intra_op_num_threads = cpu_threads
+        # Measured on a 15-page paper, CPU provider, six runs each: leaving the
+        # memory pattern on peaks at 1260 MB, turning it off at 1010 MB — both
+        # 1.95 s/page, so the 250 MB is free. The arena flag is deliberately NOT
+        # touched: it saved nothing (1285 MB) and was in the one configuration
+        # that crashed once. On the accelerated path the flag changes nothing
+        # either way (0.22 s/page, peak inside the noise), so it stays scoped to
+        # the provider it was measured on.
+        options.enable_mem_pattern = False
+    return options
+
+
+#: Process-wide session registry, keyed by what changes what gets built.
+#:
+#: A session costs far more to BUILD than to use. Measured here: the layout model
+#: takes 0.14s to set up on CPU but 6.90s on CoreML (657 of its 681 nodes get
+#: compiled for the ANE), after which CPU costs 2.27s/page against CoreML's
+#: 0.39s. Those two numbers only make sense once the session OUTLIVES a
+#: document, and until this registry existed it did not: `pipeline.make_detector`
+#: built a fresh detector per document, so 60 corpus documents spent 414s of
+#: their 505s re-compiling the same CoreML model 60 times (docs/plan.md §5.4).
+#:
+#: The key is (model file, resolved providers, CPU threads) because each changes
+#: the compiled artifact; sharing a session across a change in any of them would
+#: be wrong, not merely slower. The key space is tiny — one entry per
+#: configuration this process is asked for — so nothing is ever evicted.
+_SESSIONS: Dict[Tuple[str, Tuple[str, ...], int], Any] = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def session_for(
+    path: str,
+    providers: Sequence[str],
+    cpu_threads: int,
+    build: Optional[Callable[[], Any]] = None,
+) -> Any:
+    """The shared session for this configuration, built once per process.
+
+    onnxruntime sessions are safe to share between threads (Run is thread-safe);
+    what is not safe is the registry, and two threads must not both *build* one —
+    that would compile the model twice and defeat the point. So the build happens
+    under the lock, with a second look inside it in case the other thread got
+    there first.
+
+    ``build`` exists for tests: it substitutes the session factory so the
+    build-once property can be asserted without a model file or a real session.
+    """
+    key = (path, tuple(providers), int(cpu_threads))
+    existing = _SESSIONS.get(key)
+    if existing is not None:
+        return existing
+
+    with _SESSIONS_LOCK:
+        existing = _SESSIONS.get(key)
+        if existing is not None:
+            return existing
+        if build is not None:
+            session = build()
+        else:
+            import onnxruntime
+
+            session = onnxruntime.InferenceSession(
+                path,
+                sess_options=make_session_options(providers, cpu_threads),
+                providers=list(providers),
+            )
+        _SESSIONS[key] = session
+        return session
+
+
+def reset_session_cache() -> None:
+    """Drop every cached session. For tests; production sessions live forever."""
+    with _SESSIONS_LOCK:
+        _SESSIONS.clear()
 
 
 #: Distinct colour per block type, shared by the visualiser.
@@ -260,6 +393,73 @@ def _nms(boxes: List[Sequence[float]], iou_threshold: float) -> List[int]:
     return keep
 
 
+#: Minimum blank band (PDF points) for an XY-cut to count as a real separation.
+#:
+#: Below this the "gap" is just the space between two lines and cutting on it
+#: would break a column at an arbitrary line. On a 10 pt body line ~6 pt is
+#: clearly less than the line pitch, so a gutter clears it while line spacing
+#: does not.
+MIN_READING_GAP = 6.0
+
+
+def _merged_spans(intervals: List[Sequence[float]]) -> List[List[float]]:
+    """Union of 1-D intervals, sorted and non-overlapping."""
+    spans: List[List[float]] = []
+    for start, end in sorted(intervals):
+        if not spans or start > spans[-1][1]:
+            spans.append([start, end])
+        elif end > spans[-1][1]:
+            spans[-1][1] = end
+    return spans
+
+
+def _widest_gap(intervals: List[Sequence[float]], min_gap: float) -> Optional[float]:
+    """Centre of the widest uncovered band, or None when none is wide enough."""
+    spans = _merged_spans(intervals)
+    best: Optional[Tuple[float, float]] = None
+    for index in range(len(spans) - 1):
+        gap = spans[index + 1][0] - spans[index][1]
+        if gap >= min_gap and (best is None or gap > best[0]):
+            best = (gap, (spans[index][1] + spans[index + 1][0]) / 2.0)
+    return best[1] if best else None
+
+
+def reading_order(
+    detections: List[Dict[str, Any]], min_gap: float = MIN_READING_GAP
+) -> List[Dict[str, Any]]:
+    """Order detections the way the page is read: recursive XY-cut.
+
+    The model emits detections by confidence, so an order has to be imposed.
+    Sorting by ``(y, x)`` — a plain top-to-bottom sweep — is only correct for
+    one column: on a two-column page it interleaves the columns, so consecutive
+    blocks sit side by side while blocks stacked in one column stay apart. The
+    chunker merges consecutive blocks, so that order joined the two columns
+    into one chunk and split a column's own paragraphs.
+
+    XY-cut splits a region at its widest blank band and recurses into the two
+    halves. Vertical (column) cuts are tried first: a horizontal cut can slice
+    through a two-column region whenever both columns happen to be blank at the
+    same height, which is precisely the interleaving this is here to prevent.
+    A region that admits no cut keeps the ``(y, x)`` order.
+    """
+    def cut(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if len(items) <= 1:
+            return list(items)
+        # Axis 0 splits by x (a column break), axis 1 by y (a line break).
+        for axis in (0, 1):
+            start, end = axis, axis + 2
+            centre = _widest_gap([(d["bbox"][start], d["bbox"][end]) for d in items], min_gap)
+            if centre is None:
+                continue
+            before = [d for d in items if d["bbox"][end] <= centre]
+            after = [d for d in items if d["bbox"][start] >= centre]
+            if before and after and len(before) + len(after) == len(items):
+                return cut(before) + cut(after)
+        return sorted(items, key=lambda d: (round(d["bbox"][1], 1), d["bbox"][0]))
+
+    return cut(list(detections))
+
+
 def postprocess(raw: np.ndarray, factor: Tuple[float, float, float, float]) -> List[Dict[str, Any]]:
     """Turn the raw ``(1, 300, 6)`` output into labelled, de-duplicated boxes."""
     rows = np.asarray(raw).reshape(-1, 6)
@@ -312,9 +512,41 @@ def postprocess(raw: np.ndarray, factor: Tuple[float, float, float, float]) -> L
         claimed.append(detection["bbox"])
         unique.append(detection)
 
-    # Reading order: top to bottom, then left to right.
-    unique.sort(key=lambda d: (round(d["bbox"][1], 1), d["bbox"][0]))
-    return unique
+    return reading_order(_drop_contained(unique))
+
+
+#: Fraction of a box's area that must lie inside a larger box of the SAME type
+#: for the two to be one region detected twice.
+CONTAINED_RATIO = 0.8
+
+
+def _area(box: Sequence[float]) -> float:
+    return max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+
+
+def _drop_contained(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop a box that sits inside a larger box of its own type.
+
+    The coverage rule above cannot see this: it asks how much of a box is already
+    claimed, so a small box claimed first leaves the large one holding it mostly
+    unclaimed. Measured on a two-column paper: a 154x62 ``Text`` box sat 82%
+    inside a 485x51 ``Text`` box and carried no word the larger one did not — the
+    same authors' block extracted twice, and two blocks where the page has one.
+
+    Type matters: a caption inside the figure it labels is not a duplicate.
+    """
+    kept: List[Dict[str, Any]] = []
+    for detection in detections:
+        area = _area(detection["bbox"])
+        if any(
+            other["block_type"] == detection["block_type"]
+            and _area(other["bbox"]) > area
+            and _covered_ratio(detection["bbox"], [other["bbox"]]) >= CONTAINED_RATIO
+            for other in detections
+        ):
+            continue
+        kept.append(detection)
+    return kept
 
 
 class LayoutDetector:
@@ -350,19 +582,17 @@ class LayoutDetector:
         return ";".join(session.get_providers())
 
     def _load(self) -> Any:
-        if self._session is None:
-            import onnxruntime
+        """The shared session for this configuration (see session_for).
 
+        Also kept on the instance so repeated calls skip the registry lock, but
+        the session itself belongs to the process: a second detector over the
+        same model and providers gets the same one rather than compiling again.
+        """
+        if self._session is None:
             if not self.available:
                 raise FileNotFoundError(f"layout model not found: {self.path}")
-
             providers = self.providers or default_providers()
-            options = onnxruntime.SessionOptions()
-            if providers[0] == "CPUExecutionProvider":
-                options.intra_op_num_threads = self.cpu_threads
-            self._session = onnxruntime.InferenceSession(
-                self.path, sess_options=options, providers=providers
-            )
+            self._session = session_for(self.path, providers, self.cpu_threads)
         return self._session
 
     def detect_bitmap(self, rgb: np.ndarray) -> List[Dict[str, Any]]:

@@ -68,10 +68,14 @@ def main() -> int:
             check(field in meta, f"{cid}: metadata missing {field}", failures)
 
     types = {c.get("metadata", {}).get("block_type") for c in chunks}
-    check("Title" in types, f"no Title block detected (types={sorted(t for t in types if t)})", failures)
+    check(
+        ("Section" in types) or ("Title" in types),
+        f"no Section/Title block detected (types={sorted(t for t in types if t)})",
+        failures,
+    )
     check("Table" in types, f"no Table block detected (types={sorted(t for t in types if t)})", failures)
 
-    tables = [c for c in chunks if c.get("metadata", {}).get("block_type") == "Table"]
+    tables = [c for c in chunks if str(c.get("metadata", {}).get("block_type") or "").startswith("Table")]
     for table in tables:
         check(
             bool(TABLE_MARKER.search(table.get("text", ""))),
@@ -82,11 +86,12 @@ def main() -> int:
     pages = sorted({c.get("metadata", {}).get("page_num") for c in chunks})
     check(pages == list(range(1, len(pages) + 1)), f"page numbers are not contiguous: {pages}", failures)
 
-    titles = [c for c in chunks if c.get("metadata", {}).get("block_type") == "Title"]
-    if titles:
-        title_text = titles[0]["text"].strip()
-        sectioned = [c for c in chunks if c.get("metadata", {}).get("parent_section") == title_text]
-        check(bool(sectioned), "no chunk carries the title as parent_section", failures)
+    headings = [c for c in chunks if c.get("metadata", {}).get("block_type") in ("Section", "Title")]
+    if headings:
+        # A Section carries its heading as the first line and as parent_section.
+        heading = headings[0]["text"].strip().splitlines()[0].strip()
+        sectioned = [c for c in chunks if c.get("metadata", {}).get("parent_section") == heading]
+        check(bool(sectioned), "no chunk carries the heading as parent_section", failures)
 
     if failures:
         print("parse response FAILED:")

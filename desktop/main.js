@@ -11,7 +11,7 @@
  * matches responses to requests by id, and resolves the promise.
  */
 
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, nativeTheme } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
@@ -89,6 +89,43 @@ function kernelBinary(runtime) {
 }
 
 /**
+ * Reads the repository's `.env`, if there is one.
+ *
+ * The kernel reads real environment variables, and the documented workflow is
+ * `set -a && . ./.env && set +a` before `npm start`. That works, and it fails
+ * silently the one time it is forgotten: the kernel logs "dense retrieval
+ * disabled", `hybrid_search` degrades to keyword-only, and the only symptom is
+ * worse answers. Loading the file here removes the step.
+ *
+ * `process.env` wins over the file, so an explicitly exported value (a shell
+ * export, a CI override) is never shadowed. Only the source tree has this file;
+ * an installed bundle does not, which is why a missing file is not an error.
+ */
+function loadDotEnv(directory) {
+  const values = {};
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(directory, '.env'), 'utf8');
+  } catch {
+    return values;
+  }
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    // Strip one layer of matching quotes, the way dotenv does.
+    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value[value.length - 1] === value[0]) {
+      value = value.slice(1, -1);
+    }
+    if (key) values[key] = value;
+  }
+  return values;
+}
+
+/**
  * Environment handed to the kernel, which forwards the paths it cares about to
  * the Python sidecar.
  *
@@ -97,10 +134,97 @@ function kernelBinary(runtime) {
  * silently a cache that does not exist — so the app would look like it works
  * while re-parsing every document from scratch.
  */
+/**
+ * Settings the user can change from the UI, and the values in force before they
+ * change anything.
+ *
+ * The app owns these rather than the kernel, because prefs.json lives in
+ * userData and the kernel is never told where that is. The kernel receives them
+ * as environment at spawn, and again over `settings_set` whenever they change —
+ * so a change applies to everything the kernel reads per call without a restart.
+ */
+const SETTINGS_DEFAULTS = {
+  // '' follows the language of the question; 'zh' or 'en' forces it.
+  answerLanguage: '',
+  vision: true,
+  visionModel: 'qwen2.5vl:3b',
+  // Measured on the reference machine (docs/plan.md §5.4.1): 4 workers gave
+  // 2.75x over 1, 155 is what the model actually writes for a figure, and the
+  // longest side caps the image tokens that cost prefill.
+  visionWorkers: 4,
+  visionMaxTokens: 155,
+  visionMaxSide: 768,
+};
+
+/** Reads the settings, ignoring anything whose type is not the expected one. */
+function readSettings() {
+  const stored = readPrefs().data || {};
+  const settings = { ...SETTINGS_DEFAULTS };
+  for (const key of Object.keys(SETTINGS_DEFAULTS)) {
+    if (stored[key] !== null && typeof stored[key] === typeof SETTINGS_DEFAULTS[key]) {
+      settings[key] = stored[key];
+    }
+  }
+  return settings;
+}
+
+/**
+ * Validates a partial settings update, returning either the merged result or the
+ * reasons it was refused.
+ *
+ * Refused rather than coerced, matching the theme below: a value that is stored,
+ * survives, and is then quietly ignored is a choice the user made that did
+ * nothing — and the kernel refuses the same values, so accepting them here would
+ * only move the lie.
+ */
+function validateSettings(incoming) {
+  const settings = readSettings();
+  const errors = [];
+
+  if ('answerLanguage' in incoming) {
+    if (['', 'zh', 'en'].includes(incoming.answerLanguage)) {
+      settings.answerLanguage = incoming.answerLanguage;
+    } else {
+      errors.push(`unknown answer language: ${JSON.stringify(incoming.answerLanguage)}`);
+    }
+  }
+  if ('vision' in incoming) settings.vision = Boolean(incoming.vision);
+  if ('visionModel' in incoming) {
+    const model = String(incoming.visionModel || '').trim();
+    if (!model) errors.push('vision model must not be empty');
+    else settings.visionModel = model;
+  }
+  for (const [key, minimum] of [['visionWorkers', 1], ['visionMaxTokens', 1], ['visionMaxSide', 64]]) {
+    if (!(key in incoming)) continue;
+    const value = Number(incoming[key]);
+    if (!Number.isInteger(value) || value < minimum) {
+      errors.push(`${key} must be a whole number >= ${minimum}`);
+    } else {
+      settings[key] = value;
+    }
+  }
+  return errors.length ? { errors } : { settings };
+}
+
+/** The kernel's spelling of the same settings, which is snake_case on the wire. */
+function kernelSettingsPayload(settings) {
+  return {
+    answer_language: settings.answerLanguage,
+    vision: settings.vision,
+    vision_model: settings.visionModel,
+    vision_workers: settings.visionWorkers,
+    vision_max_tokens: settings.visionMaxTokens,
+    vision_max_side: settings.visionMaxSide,
+  };
+}
+
 function kernelEnv(runtime, qdrantReady) {
   const userData = app.getPath('userData');
   const env = {
     ...process.env,
+    // Secrets from the source tree's `.env` (dense retrieval's key lives there).
+    // Kept after process.env so an explicit export still wins.
+    ...loadDotEnv(path.join(__dirname, '..')),
     FREERAG_DATA: path.join(userData, 'data', 'index.json'),
     FREERAG_CACHE_DIR: path.join(userData, 'cache', 'parse'),
     FREERAG_LAYOUT_MODEL: path.join(runtime.models, 'deepdoc', 'layout.onnx'),
@@ -108,6 +232,19 @@ function kernelEnv(runtime, qdrantReady) {
     FREERAG_LAYA_DIR: path.join(runtime.models, 'laya-onnx'),
     FREERAG_PARSE_SIDECAR: path.join(runtime.sidecar, 'parse_server.py'),
   };
+  // What the user chose last time. Environment rather than an RPC because these
+  // have to be in force before the first parse, and because the sidecar reads
+  // the shared ones (FREERAG_VLM_*) itself.
+  const settings = readSettings();
+  env.FREERAG_ANSWER_LANGUAGE = settings.answerLanguage;
+  env.FREERAG_VLM = settings.vision ? 'on' : 'off';
+  // The model name is what the parse-time captioner keys off (sidecar/vlm.py
+  // takes it as `vlm_model` on the parse request), so switching vision OFF has
+  // to clear it — an empty name is how that path is disabled.
+  env.FREERAG_VLM_MODEL = settings.vision ? settings.visionModel : '';
+  env.FREERAG_VLM_CONCURRENCY = String(settings.visionWorkers);
+  env.FREERAG_VLM_MAX_TOKENS = String(settings.visionMaxTokens);
+  env.FREERAG_VLM_MAX_SIDE = String(settings.visionMaxSide);
   // Told about Qdrant only once something is actually answering there. The
   // kernel decides between the remote index and the in-process scan at startup,
   // so this is the only moment the choice can be made — omitting it silently
@@ -380,21 +517,33 @@ function broadcast(channel, payload) {
 }
 
 function createWindow() {
+  const { theme } = resolveTheme();
   win = new BrowserWindow({
     width: 1080,
     height: 760,
     minWidth: 860,
     minHeight: 560,
-    backgroundColor: '#0f1115',
+    // Painted before any content exists. Paired with the preload setting
+    // data-theme, this is what keeps a light-theme start from flashing a black
+    // window — the stylesheet's own default is the dark palette.
+    backgroundColor: THEME_BACKGROUND[theme] || THEME_BACKGROUND[DEFAULT_THEME],
     title: 'freerag',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Handed to the preload rather than fetched over IPC: IPC is asynchronous,
+      // and a theme applied after the first paint is a theme applied too late.
+      additionalArguments: [`--freerag-theme=${theme}`],
     },
   });
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // The hash is passed through so a view can be linked to, and so the
+  // screenshot affordance below can capture either one for the docs.
+  const initialView = process.env.FREERAG_SCREENSHOT_VIEW;
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'), {
+    hash: initialView || undefined,
+  });
 
   // Dev / CI affordance: FREERAG_SCREENSHOT=<path> captures the rendered window
   // once it has painted, then exits. It captures the app page only (never the
@@ -436,6 +585,127 @@ function emitLog(line) {
   console.log(line);
 }
 
+/**
+ * Path of the chat history file.
+ *
+ * Under userData rather than beside the executable: an installed app bundle is
+ * read-only, and a history that cannot be written is silently no history at all.
+ */
+function chatsPath() {
+  return path.join(app.getPath('userData'), 'chats.json');
+}
+
+/** Reads the chat history, reporting an empty one when there is none. */
+function readChats() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(chatsPath(), 'utf8'));
+    // Guarded rather than trusted: the shape is written by this app, but a
+    // file that lost its sessions, or that someone edited, would otherwise
+    // fail somewhere deeper with a message about undefined.
+    if (!parsed || !Array.isArray(parsed.sessions)) {
+      return { ok: true, data: { sessions: [] } };
+    }
+    return { ok: true, data: parsed };
+  } catch (error) {
+    // Absent is the normal first run. Corrupt is not: it is reported so the
+    // file can be recovered, rather than silently replaced with an empty
+    // history that looks like the conversations were never there.
+    if (error.code === 'ENOENT') return { ok: true, data: { sessions: [] } };
+    return { ok: false, error: error.message };
+  }
+}
+
+/**
+ * Writes the chat history atomically.
+ *
+ * Temporary file plus rename: this is the only copy of every conversation, and
+ * a crash partway through an in-place write would leave a truncated file that
+ * parses as nothing.
+ */
+function writeChats(payload) {
+  try {
+    const target = chatsPath();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temporary = `${target}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(temporary, target);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+/**
+ * Path of the preferences file.
+ *
+ * Beside the chat history and under userData for the same reason: an installed
+ * bundle is read-only, and a preference that cannot be written is silently no
+ * preference at all.
+ */
+function prefsPath() {
+  return path.join(app.getPath('userData'), 'prefs.json');
+}
+
+/** The two themes, and the colour each paints the window before content exists. */
+const THEME_BACKGROUND = { dark: '#0f1115', light: '#eef1f5' };
+const THEMES = Object.keys(THEME_BACKGROUND);
+const DEFAULT_THEME = 'dark';
+
+/** Reads the preferences, reporting none when there are none. */
+function readPrefs() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(prefsPath(), 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return { ok: true, data: {} };
+    return { ok: true, data: parsed };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { ok: true, data: {} };
+    return { ok: false, error: error.message };
+  }
+}
+
+/** Writes the preferences atomically, the way the chat history is written. */
+function writePrefs(payload) {
+  try {
+    const target = prefsPath();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temporary = `${target}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(temporary, target);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+/**
+ * Resolves the theme to open in.
+ *
+ * Three sources, in the order that makes each one useful:
+ *
+ *   1. FREERAG_THEME — an override, so a screenshot or a test can pin the theme
+ *      whatever this machine's user last chose. It writes nothing back, so a
+ *      dev session cannot silently change the stored preference.
+ *   2. the saved preference — what the user picked, and by definition the only
+ *      source that survives a restart.
+ *   3. the OS — the default for someone who has never chosen. Opening a
+ *      light-mode machine in a black window is a choice made for them, and the
+ *      wrong one.
+ *
+ * The result is handed to the renderer rather than left to a CSS media query,
+ * so there is exactly one place that decides and the UI's own toggle can
+ * disagree with the OS without the stylesheet second-guessing it.
+ */
+function resolveTheme() {
+  const forced = String(process.env.FREERAG_THEME || '').toLowerCase();
+  if (THEMES.includes(forced)) return { theme: forced, source: 'env' };
+
+  const saved = readPrefs();
+  const stored = saved.ok ? String(saved.data.theme || '').toLowerCase() : '';
+  if (THEMES.includes(stored)) return { theme: stored, source: 'prefs' };
+
+  return { theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light', source: 'system' };
+}
+
 app.whenReady().then(async () => {
   const runtime = resolveRuntime();
 
@@ -459,7 +729,13 @@ app.whenReady().then(async () => {
   ipcMain.handle('pick-files', async () => {
     const picked = await dialog.showOpenDialog(win, {
       title: '选择要索引的文档',
-      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      // The sidecar decides what it can parse (sidecar/documents.py); this list
+      // only spares the user from picking an archive and getting an error. Keep
+      // the two in step.
+      filters: [
+        { name: '文档', extensions: ['pdf', 'docx', 'doc', 'rtf', 'txt', 'md'] },
+        { name: '全部文件', extensions: ['*'] },
+      ],
       properties: ['openFile', 'multiSelections'],
     });
     return picked.canceled ? [] : picked.filePaths;
@@ -479,6 +755,64 @@ app.whenReady().then(async () => {
   }));
 
   ipcMain.handle('kernel-log-history', () => logBuffer.slice());
+
+  // Chat history is the shell's own data rather than the kernel's. It is a list
+  // of questions and answers that nothing in the retrieval pipeline reads, so
+  // keeping it here means one writer for the file and no RPC surface for data
+  // the kernel never touches.
+  ipcMain.handle('chat-load', () => readChats());
+  ipcMain.handle('chat-save', (_event, payload) => writeChats(payload));
+
+  // Preferences live here for the same reason the chat history does: nothing in
+  // the retrieval pipeline reads which theme is on, so the kernel has no
+  // business knowing about it.
+  ipcMain.handle('prefs-load', () => {
+    const resolved = resolveTheme();
+    return {
+      ok: true,
+      data: {
+        theme: resolved.theme,
+        source: resolved.source,
+        themes: THEMES,
+        settings: readSettings(),
+        defaults: SETTINGS_DEFAULTS,
+      },
+    };
+  });
+
+  ipcMain.handle('prefs-save', async (_event, payload) => {
+    const incoming = payload || {};
+    const checked = validateSettings(incoming);
+    if (checked.errors) {
+      return { ok: false, error: checked.errors.join('; ') };
+    }
+
+    const next = { ...(readPrefs().data || {}), ...incoming };
+    // Refused rather than coerced. A theme name this build does not have would
+    // be written, survive, and then be silently ignored at the next start — a
+    // choice the user made that quietly did nothing.
+    if (next.theme !== undefined && !THEMES.includes(next.theme)) {
+      return { ok: false, error: `unknown theme: ${next.theme}` };
+    }
+    // The validated values are what land in the file, so a rejected number cannot
+    // get in through a field this build does not know about.
+    Object.assign(next, checked.settings);
+
+    const written = writePrefs(next);
+    if (!written.ok) return written;
+
+    // Pushed to the running kernel so the change applies now rather than at the
+    // next launch. Reported on failure instead of hidden: the file and the
+    // running app would otherwise disagree, and the UI would look correct.
+    if (kernel) {
+      try {
+        await kernel.call('settings_set', kernelSettingsPayload(checked.settings));
+      } catch (error) {
+        return { ok: true, data: { ...next, settings: checked.settings, kernel_error: error.message } };
+      }
+    }
+    return { ok: true, data: { ...next, settings: checked.settings } };
+  });
 
   createWindow();
   broadcast('kernel-status', { running: started, binary: kernel.binPath });

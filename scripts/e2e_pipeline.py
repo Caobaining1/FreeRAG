@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
@@ -26,13 +27,22 @@ DEFAULT_QUESTIONS = [
     "How does GRPO differ from PPO?",
 ]
 
+# metadata_search filters on exactly two fields, doc_id and indexed_at. The time
+# rule below is the one its schema states: indexed_at holds a full timestamp, so
+# ONE day is asked for with "start with" and the bare date — "=" never matches a
+# stored time. A document indexed by this run is therefore always "today".
+TODAY = time.strftime("%Y-%m-%d")
+
 TOOL_CALLS = [
     ("hybrid_search", {"query": "agentic search reinforcement learning", "k": 5}),
     ("grep_search", {"pattern": "GRPO"}),
     ("grep_search", {"pattern": r"DAPO|DPO", "regex": True}),
     ("list_chunks", {"doc_id": "", "limit": 3}),
-    ("metadata_search", {"block_type": "Table", "limit": 5}),
-    ("metadata_search", {"block_type": "Figure", "limit": 5}),
+    ("metadata_search", {"filters": [{"key": "doc_id", "op": "end with", "value": ".pdf"}], "limit": 5}),
+    ("metadata_search", {"filters": [{"key": "indexed_at", "op": "start with", "value": TODAY}], "limit": 5}),
+    # A field the index does not have must be refused by name, never answered
+    # with an empty result — that is the whole reason the two are distinguished.
+    ("metadata_search", {"filters": [{"key": "author", "op": "contains", "value": "Zhao"}]}),
 ]
 
 
@@ -170,6 +180,16 @@ def main() -> int:
         report(label[:26], seconds, "%d hit(s) — %s" % (len(hits), raw.get("note", "")))
         if method == "hybrid_search" and not hits:
             failures.append("hybrid_search returned no hits")
+        if method == "metadata_search":
+            keys = [item.get("key") for item in (arguments.get("filters") or [])]
+            note = raw.get("note", "")
+            if "author" in keys:
+                # Refusing a field the index does not have is the correct
+                # outcome; answering it with a plain miss is the bug.
+                if not hits and "do not exist" not in note:
+                    failures.append("an unknown metadata field was not refused by name")
+            elif keys and not hits:
+                failures.append("metadata_search on %s returned no hits" % keys)
 
     print("\n=== 5. agentic Q&A (%d question(s)) ===" % (0 if args.no_ask else len(questions)))
     for question in ([] if args.no_ask else questions):
@@ -191,10 +211,17 @@ def main() -> int:
             failures.append("ask produced no draft: %s" % question)
 
     print("\n=== 6. persistence ===")
-    if os.path.isfile(index_path):
-        report("index.json", 0.0, "%.1f KB" % (os.path.getsize(index_path) / 1024.0))
+    # The index lives under the knowledge-base ROOT, not at FREERAG_DATA: that
+    # variable is now only the legacy path a single-base install is adopted
+    # from, and nothing writes to it. Checking it made this stage fail on every
+    # scan since the multi-base change, which is worse than not checking at all
+    # — a suite that always reports one failure trains you to ignore it.
+    written = sorted(glob.glob(os.path.join(data_dir, "**", "index.json"), recursive=True))
+    if written:
+        total = sum(os.path.getsize(path) for path in written)
+        report("index.json", 0.0, "%d file(s), %.1f KB total" % (len(written), total / 1024.0))
     else:
-        failures.append("index.json was not written")
+        failures.append("no index.json was written under the knowledge-base root")
 
     summary = {"parse": parse_result, "index": index_result, "questions": questions}
     with open(os.path.join(args.out, "summary.json"), "w", encoding="utf-8") as handle:

@@ -8,15 +8,19 @@ Pipeline: see pipeline.py and docs/plan.md §5.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 # Allow `python3 sidecar/parse_server.py` from any working directory.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from pipeline import parse_pdf  # noqa: E402
+from documents import SUPPORTED_SUFFIXES  # noqa: E402
+from pipeline import parse_document  # noqa: E402
 
 PROTOCOL_VERSION = "2.0"
 
@@ -50,6 +54,9 @@ def _capabilities() -> Dict[str, Any]:
         "laya": False,
         "onnxruntime": False,
         "tsr": False,
+        # The formats `parse` accepts, so a caller can tell "unsupported" from a
+        # parse failure without guessing at suffixes.
+        "formats": list(SUPPORTED_SUFFIXES),
     }
     try:
         import pymupdf  # noqa: F401
@@ -74,15 +81,20 @@ def _capabilities() -> Dict[str, Any]:
 
 #: The Laya session is expensive to build (~1.7 GB of weights), so it is cached
 #: for the process lifetime and only built when a decision is first requested.
+_DECIDERS_LOCK = threading.Lock()
 _DECIDERS: Dict[str, Any] = {}
 
 
 def _decider() -> Any:
     from laya import LayaDecider
 
-    if "laya" not in _DECIDERS:
-        _DECIDERS["laya"] = LayaDecider()
-    return _DECIDERS["laya"]
+    # Locked, and held across the construction: `serve` answers requests on a
+    # thread pool, so two of them can ask for the decider before the first has
+    # built it. Unlocked, that check builds the checkpoint twice.
+    with _DECIDERS_LOCK:
+        if "laya" not in _DECIDERS:
+            _DECIDERS["laya"] = LayaDecider()
+        return _DECIDERS["laya"]
 
 
 def method_ping(_params: Any) -> Any:
@@ -104,6 +116,8 @@ def method_parse(params: Any) -> Any:
     profile = params.get("profile") or "mixed"
     max_chars = params.get("max_chars")
     max_pages = params.get("max_pages") or 0
+    # Vision model for Figure regions, or "" to skip it. Parse-time only.
+    vlm_model = params.get("vlm_model") or ""
 
     if max_chars is not None and (not isinstance(max_chars, int) or max_chars <= 0):
         raise RPCError(INVALID_PARAMS, "params.max_chars must be a positive integer")
@@ -111,9 +125,12 @@ def method_parse(params: Any) -> Any:
         raise RPCError(INVALID_PARAMS, "params.max_pages must be a non-negative integer")
     if not isinstance(profile, str):
         raise RPCError(INVALID_PARAMS, "params.profile must be a string")
+    if not isinstance(vlm_model, str):
+        raise RPCError(INVALID_PARAMS, "params.vlm_model must be a string")
 
     try:
-        return parse_pdf(path, profile=profile, max_chars=max_chars, max_pages=max_pages)
+        return parse_document(path, profile=profile, max_chars=max_chars, max_pages=max_pages,
+                              vlm_model=vlm_model)
     except FileNotFoundError as exc:
         raise RPCError(NOT_FOUND, str(exc), {"path": path}) from exc
     except ValueError as exc:
@@ -158,12 +175,125 @@ def method_decide(params: Any) -> Any:
         raise RPCError(INVALID_PARAMS, str(exc)) from exc
 
 
+def method_render(params: Any) -> Any:
+    """Render one page of a source document to PNG.
+
+    The desktop UI draws a chunk's bbox over the page that chunk came from, and
+    that bbox is measured in PDF points (chunking.Block.to_chunk). Rendering the
+    page HERE is what keeps that to a single coordinate system: PyMuPDF is
+    already a dependency, the page's size in points comes back alongside the
+    image, and the Electron side never has to open a PDF at all. The renderer
+    scales by ``width_pt`` / ``height_pt``.
+
+    ``page`` is 1-based, matching the ``page_num`` every chunk carries. An
+    off-by-one here would draw every highlight on the wrong page, which reads as
+    a data problem rather than as a UI one.
+    """
+    if not isinstance(params, dict):
+        raise RPCError(INVALID_PARAMS, "params must be an object")
+
+    path = params.get("path")
+    if not path or not isinstance(path, str):
+        raise RPCError(INVALID_PARAMS, "params.path is required")
+
+    page_number = params.get("page")
+    if not isinstance(page_number, int) or page_number < 1:
+        raise RPCError(INVALID_PARAMS, "params.page must be a positive integer (1-based)")
+
+    # 110 dpi is ~1.5x a typical screen rendering of a letter page: enough that
+    # body text stays legible without shipping a megabyte per page over a pipe.
+    dpi = params.get("dpi") or 110
+    if not isinstance(dpi, int) or not 36 <= dpi <= 400:
+        raise RPCError(INVALID_PARAMS, "params.dpi must be an integer in [36, 400]")
+
+    # Optional crop, in the same PDF points the chunk bboxes use. The UI does not
+    # pass it (it draws the bbox over a whole page); the figure captioner does,
+    # and a crop is what keeps a vision model from being fed a whole page to look
+    # at one chart.
+    raw_clip = params.get("bbox")
+    clip_values = None
+    if raw_clip is not None:
+        if (not isinstance(raw_clip, (list, tuple)) or len(raw_clip) != 4
+                or not all(isinstance(v, (int, float)) for v in raw_clip)):
+            raise RPCError(INVALID_PARAMS, "params.bbox must be [x0, y0, x1, y1] in points")
+        clip_values = [float(v) for v in raw_clip]
+        if clip_values[2] <= clip_values[0] or clip_values[3] <= clip_values[1]:
+            raise RPCError(INVALID_PARAMS, "params.bbox is empty")
+
+    # Longest-side cap in pixels. Image tokens cost prefill on the vision model
+    # (measured: 82 tok/s, ~1/3 of its text prefill), so a page-sized crop is
+    # mostly wasted work; the caller asks for what it needs.
+    max_side = params.get("max_side") or 0
+    if not isinstance(max_side, int) or max_side < 0:
+        raise RPCError(INVALID_PARAMS, "params.max_side must be a non-negative integer")
+
+    try:
+        import pymupdf
+    except ImportError as exc:
+        raise RPCError(INTERNAL_ERROR, f"missing dependency: {exc}", {"hint": "pip install pymupdf"}) from exc
+
+    try:
+        document = pymupdf.open(path)
+    except FileNotFoundError as exc:
+        raise RPCError(NOT_FOUND, f"source file is gone: {path}", {"path": path}) from exc
+    except Exception as exc:  # noqa: BLE001 - a damaged file must be reported, not crash
+        raise RPCError(NOT_FOUND, f"cannot open {path}: {exc}", {"path": path}) from exc
+
+    try:
+        if page_number > document.page_count:
+            raise RPCError(
+                NOT_FOUND,
+                f"page {page_number} is outside the document ({document.page_count} page(s))",
+                {"path": path, "pages": document.page_count},
+            )
+        page = document.load_page(page_number - 1)
+        rect = page.rect
+        clip = None
+        if clip_values is not None:
+            clip = pymupdf.Rect(*clip_values) & rect
+            if clip.is_empty:
+                raise RPCError(
+                    INVALID_PARAMS,
+                    "params.bbox does not overlap the page",
+                    {"path": path, "page": page_number},
+                )
+
+        # The cap is applied by LOWERING THE DPI, not by resizing afterwards:
+        # rendering at 150 dpi and shrinking throws away the pixels it just paid
+        # to produce, and the stored image is what the model sees either way.
+        target = clip or rect
+        effective_dpi = dpi
+        if max_side:
+            longest_pt = max(target.width, target.height)
+            if longest_pt > 0:
+                effective_dpi = max(24, min(dpi, int(max_side * 72.0 / longest_pt)))
+
+        pixmap = page.get_pixmap(dpi=effective_dpi, alpha=False, clip=clip)
+        return {
+            "page": page_number,
+            "pages": document.page_count,
+            "dpi": effective_dpi,
+            # Points are what bbox is measured in, so these two are what the
+            # renderer divides by. The pixel sizes are informational.
+            "width_pt": float(rect.width),
+            "height_pt": float(rect.height),
+            "width_px": int(pixmap.width),
+            "height_px": int(pixmap.height),
+            # PNG as base64: this channel is line-delimited JSON, so the bytes
+            # have to survive as text.
+            "image": base64.b64encode(pixmap.tobytes("png")).decode("ascii"),
+        }
+    finally:
+        document.close()
+
+
 # Method table: name -> handler. Add entries as phases land.
 METHODS = {
     "ping": method_ping,
     "version": method_version,
     "parse": method_parse,
     "decide": method_decide,
+    "render": method_render,
 }
 
 
@@ -206,27 +336,82 @@ def _error(req_id: Any, code: int, message: str, data: Any = None) -> Dict[str, 
     return resp
 
 
+def _thread_setting(name: str, fallback: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, "") or fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+#: How many requests the sidecar works on at once, per lane.
+#:
+#: Two lanes, because the two kinds of work are limited by different things. A
+#: `decide` is CPU-bound inside one ONNX session — measured 2.0s for a 236-token
+#: state and 14.6s at about 2k — and two at once really do use two cores, so
+#: parallelism buys throughput. A `parse` holds hundreds of MB of activations
+#: and is bandwidth-bound (measured: four concurrent parses took four times the
+#: wall time of one, for 836 MB each), so it stays serial. This is the explicit
+#: inference budget RAGFlow keeps for its deepdoc stage too
+#: (`deepdoc.inference_concurrency`, default 4), rather than "as many as the
+#: pool happens to allow".
+DECIDE_THREADS = _thread_setting("FREERAG_DECIDE_THREADS", 2)
+PARSE_THREADS = _thread_setting("FREERAG_PARSE_THREADS", 1)
+
+#: The methods that run on the serial lane.
+_PARSE_LANE = frozenset({"parse", "render"})
+
+
 def serve(stdin=sys.stdin, stdout=sys.stdout) -> None:
-    """Read NDJSON JSON-RPC requests and write responses until EOF."""
-    for raw in stdin:
-        line = raw.strip()
-        if not line:
-            continue
+    """Read NDJSON JSON-RPC requests and answer them, up to N at a time.
+
+    Requests are read on this thread and executed on a pool, so a long parse no
+    longer blocks a decision behind it — which is the point: the kernel
+    multiplexes by request id and does not need answers in order.
+
+    Responses may therefore come back out of order. That is a property of the
+    protocol rather than a coincidence — the kernel matches them by id
+    (internal/sidecar/client.go's readLoop) — but the WRITE is still locked: two
+    workers interleaving halves of a line would corrupt the stream, which no
+    reader can recover from.
+    """
+    write_lock = threading.Lock()
+
+    def emit(payload: Dict[str, Any]) -> None:
+        line = json.dumps(payload, ensure_ascii=False) + "\n"
+        with write_lock:
+            stdout.write(line)
+            stdout.flush()
+
+    def run(request: Dict[str, Any]) -> None:
         try:
-            request = json.loads(line)
-        except json.JSONDecodeError as exc:
-            stdout.write(json.dumps(_error(None, PARSE_ERROR, "parse error: %s" % exc)) + "\n")
-            stdout.flush()
-            continue
-        if not isinstance(request, dict):
-            stdout.write(json.dumps(_error(None, INVALID_REQUEST, "request must be an object")) + "\n")
-            stdout.flush()
-            continue
-        response = handle(request)
-        if response is None:
-            continue
-        stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-        stdout.flush()
+            response = handle(request)
+        except Exception as exc:  # noqa: BLE001 - one bad request must not kill the reader
+            response = _error(request.get("id"), INTERNAL_ERROR, "handler crashed: %s" % exc)
+        if response is not None:
+            emit(response)
+
+    parse_lane = ThreadPoolExecutor(max_workers=PARSE_THREADS, thread_name_prefix="freerag-parse")
+    fast_lane = ThreadPoolExecutor(max_workers=DECIDE_THREADS, thread_name_prefix="freerag-decide")
+    try:
+        for raw in stdin:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+            except json.JSONDecodeError as exc:
+                emit(_error(None, PARSE_ERROR, "parse error: %s" % exc))
+                continue
+            if not isinstance(request, dict):
+                emit(_error(None, INVALID_REQUEST, "request must be an object"))
+                continue
+            lane = parse_lane if request.get("method") in _PARSE_LANE else fast_lane
+            lane.submit(run, request)
+    finally:
+        # Waiting here is the difference between a clean exit and silently
+        # dropping the answers that were still in flight when stdin closed.
+        parse_lane.shutdown(wait=True)
+        fast_lane.shutdown(wait=True)
 
 
 if __name__ == "__main__":

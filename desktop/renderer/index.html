@@ -2,9 +2,13 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
+    <!-- img-src allows data: because a rendered page arrives as a base64 PNG
+         over the kernel's JSON-RPC channel. Nothing else is loosened: scripts
+         and styles stay same-origin, and there is no connect-src, so the page
+         cannot reach out on its own. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:"
     />
     <title>freerag</title>
     <link rel="stylesheet" href="styles.css" />
@@ -15,64 +19,268 @@
         <span class="logo">f</span>
         <span class="brand-name">freerag</span>
       </div>
-      <div class="health" id="health"></div>
+
+      <!-- Two views, not two windows: a knowledge base is what a question is
+           asked against, so moving between them is a change of context rather
+           than of application. -->
+      <nav class="tabs">
+        <button id="tab-kb" class="tab" type="button">知识库</button>
+        <button id="tab-chat" class="tab" type="button">问答</button>
+      </nav>
+
+      <div class="topbar-right">
+        <button id="settings-open" class="ghost icon" type="button" title="设置">⚙</button>
+        <button id="theme-toggle" class="ghost icon" type="button"></button>
+        <div class="health" id="health"></div>
+      </div>
     </header>
 
-    <main class="layout">
-      <aside class="sidebar">
-        <div class="sidebar-head">
-          <h2>文档</h2>
-          <button id="add" class="ghost" type="button">添加</button>
-        </div>
-
-        <div id="dropzone" class="dropzone">
-          把 PDF 拖到这里，或点上面的「添加」
-        </div>
-
-        <ul id="documents" class="documents"></ul>
-
-        <div class="sidebar-foot" id="index-summary"></div>
-      </aside>
-
-      <section class="workspace">
-        <form id="ask-form" class="ask">
-          <textarea
-            id="question"
-            rows="2"
-            placeholder="就这些文档提问，回车发送（Shift+回车换行）"
-            spellcheck="false"
-          ></textarea>
-          <button id="ask" class="primary" type="submit">提问</button>
-        </form>
-
-        <div id="progress" class="progress hidden">
-          <div class="progress-head">
-            <span class="spinner"></span>
-            <span id="progress-stage">准备中…</span>
-            <span id="progress-elapsed" class="muted"></span>
+    <main class="view" id="view-kb">
+      <!-- Screen 1: choose a knowledge base.
+           Same shape as the chat view, and for the same reason: which base you
+           meant is not something the app can infer, and opening one silently is
+           how a file ends up in the wrong index. -->
+      <section class="pane picker" id="kb-picker">
+        <div class="picker-head">
+          <div>
+            <h2>知识库</h2>
+            <p class="muted">选择一个知识库，或新建一个。每个库是一份独立的索引。</p>
           </div>
-          <pre id="progress-log" class="progress-log"></pre>
+          <button id="kb-add" class="primary" type="button">新建知识库</button>
         </div>
 
-        <div id="notice" class="notice hidden"></div>
+        <ul id="kb-list" class="sessions"></ul>
 
-        <article id="answer" class="answer hidden">
-          <div class="answer-head">
-            <span class="badge" id="verdict"></span>
-            <span class="muted" id="answer-meta"></span>
-          </div>
-          <div class="draft" id="draft"></div>
-          <details class="evidence" open>
-            <summary>证据 <span class="muted" id="evidence-count"></span></summary>
-            <ol id="evidence"></ol>
-          </details>
-        </article>
-
-        <div id="empty" class="empty">
-          <p id="empty-text">还没有索引任何文档。</p>
+        <div id="kb-empty" class="empty">
+          <p>还没有知识库。新建一个，再把 PDF 拖进去。</p>
         </div>
       </section>
+
+      <!-- Screen 2: inside one knowledge base.
+           Left: the documents in it. Right: the chunk inspector for whichever
+           document is selected — the original page on one side, the chunks cut
+           from it on the other, each locating the other. -->
+      <div class="session hidden" id="kb-detail">
+        <aside class="pane pane-narrow">
+          <div class="pane-head">
+            <button id="kb-back" class="ghost" type="button">← 返回</button>
+            <button id="kb-rename" class="ghost" type="button">重命名</button>
+            <button id="kb-delete" class="ghost danger" type="button">删除</button>
+          </div>
+
+          <div class="session-label">
+            <span class="list-name" id="kb-title"></span>
+            <span class="list-meta" id="kb-summary"></span>
+          </div>
+
+          <div id="dropzone" class="dropzone">把 PDF 拖到这里</div>
+          <div class="row">
+            <button id="doc-add" class="primary" type="button">添加文档</button>
+          </div>
+
+          <ul id="documents" class="documents"></ul>
+        </aside>
+
+        <section class="pane split">
+          <div id="inspect-empty" class="empty">
+            <p>从左侧选一个文档，看它的分块，以及每一块来自原文的哪个位置。</p>
+          </div>
+
+          <div id="inspect-body" class="inspect hidden">
+            <div class="origin">
+              <div class="origin-head">
+                <button id="page-prev" class="ghost" type="button">‹</button>
+                <span id="page-label" class="muted"></span>
+                <button id="page-next" class="ghost" type="button">›</button>
+                <span class="spacer"></span>
+                <label class="check">
+                  <input id="show-all" type="checkbox" />
+                  <span>显示本页全部框</span>
+                </label>
+              </div>
+
+              <div class="origin-scroll">
+                <div class="page-frame" id="page-frame">
+                  <img id="page-image" alt="" />
+                  <!-- Percentages, not pixels: the box has to hold its place
+                       when the image is scaled to the pane's width. -->
+                  <div class="page-boxes" id="page-boxes"></div>
+                </div>
+                <div id="origin-status" class="origin-status muted"></div>
+              </div>
+            </div>
+
+            <div class="chunklist">
+              <div class="chunklist-head">
+                <span id="chunk-summary" class="muted"></span>
+                <label class="check">
+                  <input id="only-page" type="checkbox" />
+                  <span>只看本页</span>
+                </label>
+              </div>
+              <ul id="chunks" class="chunks"></ul>
+            </div>
+          </div>
+        </section>
+      </div>
     </main>
+
+    <main class="view hidden" id="view-chat">
+      <!-- Screen 1: choose a session.
+           Entering the chat view always lands here, because which session you
+           meant is not something the app can infer — and picking for you is how
+           a question ends up in the wrong one. -->
+      <section class="pane picker" id="chat-picker">
+        <div class="picker-head">
+          <div>
+            <h2>问答</h2>
+            <p class="muted">选择一个会话，或新建一个。会话在创建时绑定一个知识库。</p>
+          </div>
+          <button id="session-add" class="primary" type="button">新建会话</button>
+        </div>
+
+        <ul id="session-list" class="sessions"></ul>
+
+        <div id="session-empty" class="empty">
+          <p>还没有会话。新建一个，并选择它要用的知识库。</p>
+        </div>
+      </section>
+
+      <!-- Screen 2: inside one session.
+           Only the conversation history is on the left — the session list
+           belongs to the screen above, and carrying it down here would mean two
+           ways to change which session you are in. -->
+      <div class="session hidden" id="chat-session">
+        <aside class="pane pane-narrow">
+          <div class="pane-head">
+            <button id="session-back" class="ghost" type="button">← 返回</button>
+            <button id="conversation-add" class="ghost" type="button">新建</button>
+          </div>
+
+          <div class="session-label">
+            <span class="list-name" id="session-title"></span>
+            <span class="list-meta" id="session-kb"></span>
+          </div>
+
+          <ul id="conversation-list" class="list"></ul>
+        </aside>
+
+        <section class="pane">
+          <div class="pane-head">
+            <h2 id="chat-title">对话</h2>
+          </div>
+
+          <div id="messages" class="messages"></div>
+
+          <form id="ask-form" class="ask hidden">
+            <textarea
+              id="question"
+              rows="2"
+              placeholder="就这个知识库提问，回车发送（Shift+回车换行）"
+              spellcheck="false"
+            ></textarea>
+            <button id="ask" class="primary" type="submit">提问</button>
+          </form>
+
+          <div id="chat-empty" class="empty">
+            <p>这个会话还没有对话。</p>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- One progress strip for both views: an index and an answer are both
+         long enough that a frozen window is indistinguishable from a hang. -->
+    <div id="progress" class="progress hidden">
+      <div class="progress-head">
+        <span class="spinner"></span>
+        <span id="progress-stage">准备中…</span>
+        <span id="progress-elapsed" class="muted"></span>
+        <!-- A batch index runs for minutes; without this the only way out is to
+             quit the app. Hidden unless a cancellable job is running. -->
+        <button id="progress-cancel" class="ghost hidden" type="button">取消</button>
+      </div>
+      <pre id="progress-log" class="progress-log"></pre>
+    </div>
+
+    <div id="notice" class="notice hidden"></div>
+
+    <!-- A native dialog rather than window.prompt: creating a session needs a
+         knowledge base chosen at the same time as a name, and prompt() cannot
+         ask two things. method="dialog" makes the buttons resolve showModal
+         without any submit handling of our own. -->
+    <!-- Settings, persisted in prefs.json and pushed to the kernel over
+         settings_set so a change applies without a restart. The one exception
+         is the caption concurrency, which is sized when the stage first runs —
+         the dialog says so rather than letting a change look applied. -->
+    <dialog id="settings-dialog" class="dialog">
+      <form id="settings-form" method="dialog">
+        <h3>设置</h3>
+
+        <label class="field">
+          <span>回答语言</span>
+          <select id="settings-language">
+            <option value="">跟随提问语言</option>
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+
+        <label class="field check">
+          <input id="settings-vision" type="checkbox" />
+          <span>用视觉模型为图片生成内容摘要（只处理 Figure 块）</span>
+        </label>
+
+        <label class="field">
+          <span>视觉模型</span>
+          <input id="settings-vision-model" type="text" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          <span>描述并发</span>
+          <input id="settings-vision-workers" type="number" min="1" max="16" />
+        </label>
+
+        <label class="field">
+          <span>描述长度上限（token，上限非定长）</span>
+          <input id="settings-vision-tokens" type="number" min="1" max="512" />
+        </label>
+
+        <label class="field">
+          <span>裁剪图最长边（像素）</span>
+          <input id="settings-vision-side" type="number" min="64" max="2048" />
+        </label>
+
+        <p class="muted" id="settings-note"></p>
+
+        <div class="dialog-actions">
+          <button value="cancel" class="ghost" type="submit">取消</button>
+          <button id="settings-save" value="ok" class="primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="prompt-dialog" class="dialog">
+      <!-- id on the 确定 button, not just a value: implicit submission (Enter
+           in the text field) activates the FIRST submit button in tree order,
+           which is 取消, so Enter would cancel. app.js submits this button
+           explicitly instead. -->
+      <form id="prompt-form" method="dialog">
+        <h3 id="prompt-title">新建</h3>
+        <label id="prompt-select-row" class="field hidden">
+          <span>知识库</span>
+          <select id="prompt-select"></select>
+        </label>
+        <label class="field">
+          <span>名称</span>
+          <input id="prompt-input" type="text" autocomplete="off" />
+        </label>
+        <div class="dialog-actions">
+          <button value="cancel" class="ghost" type="submit">取消</button>
+          <button id="prompt-ok" value="ok" class="primary" type="submit">确定</button>
+        </div>
+      </form>
+    </dialog>
 
     <footer class="statusbar">
       <span id="kernel-line" class="muted">内核：连接中…</span>

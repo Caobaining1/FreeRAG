@@ -3,6 +3,7 @@
 > 依据：`deepseek_txt_20260928_b9912d.txt`（桌面端 Agentic RAG 系统开发对话记录）
 > 补充：解析管线参考 `TUIrag/layout_chunker.py`（PP-DocLayout + PyMuPDF 串行管道），表格解析借鉴 RAGFlow `deepdoc`（TSR 表格结构识别 + `construct_table`）。
 > 说明：对话末尾"客户端/开发端划分与版本分发"一节在「采用以下目录结构：」处中断，相关条目在 §11 标注为**待补充**。
+> **性能与并行**：试过什么、为什么提速/没提速、未来方向，全部实测记录在 **`docs/performance.md`**（改并发之前先读它——里面也列了"不要重试"的路）。
 
 ## 0. 状态与剩余工作
 
@@ -16,7 +17,11 @@
 | # | 事项 | 为什么现在必须做 | 位置 |
 | :--- | :--- | :--- | :--- |
 | 1 | **存储层：关键词索引与增量落盘** | **密集那一半已由 Qdrant 接手**（实测 recall@10 = 1.000，选型见 §4）。剩下的是关键词侧：BM25 词索引与 chunk 文本都在内存、`Save` 仍是 O(全库) 重写。实测 200k chunks：Save **10.3s/次**、内存 1343MB。**是否真要引入 SQLite FTS5，取决于目标语料规模——取舍分析见 §0.3.2** | `internal/store/`（BM25 / grep / RRF） |
-> **P0 只剩一项。** 原 **P0-2（打包 Python 运行时）已于 2026-09-29 完成**：
+| 2 | **标题块被当成独立 chunk 索引** | 实测 1302 个 chunk 里 **164 个是 `Title` 块、平均 27 字符**（占 12.6%），而标题逐字包含查询词，检索因此**优先返回它们**：一次详尽回答引用的 6 条证据**全部短于 120 字符，其中 5 条就是标题**（`一、考核目的` 6 字符、`重点考核：` 5 字符、`三、交付要求` 6 字符）。模型被要求写出 646 字符的详尽答案，手上却只有约 135 字符的实质内容，**只能靠重复和空话凑**。标题在结构上是其后正文的前缀而非独立段落，应在分块时并入 —— 这样标题文字仍可被检索到，但命中它的是一条真实段落 | `sidecar/chunking.py` |
+
+> **P0 现在是两项**：上面第 2 项（标题分块）是新登记的，第 1 项与之前相同。
+>
+> 此前的 **P0-2（打包 Python 运行时）已于 2026-09-29 完成**：
 > 随包带 python-build-standalone 的 CPython 3.14 加 sidecar 的四个依赖
 > （`scripts/fetch-python-runtime.sh`，裁到约 258 MB），`desktop/main.js` 改成**显式下发
 > `FREERAG_PYTHON`** 而不再依赖 PATH 探测。验收用 `env -i` 的干净环境跑打包件解析真实 38 页 PDF：
@@ -30,7 +35,7 @@
 | # | 事项 | 现状 | 位置 |
 | :--- | :--- | :--- | :--- |
 | 3 | **OCR 兜底（扫描件）** | `det.onnx` + `rec.onnx` + `ocr.res` 已下载未接入；**现在扫描件完全无法解析** | `sidecar/` |
-| 4 | **双栏处理** | 依赖版面模型的阅读顺序，未显式处理 x 间隙。缓存部分**已完成** | `sidecar/layout.py` |
+| 4 | ~~**双栏处理**~~ | **已解决（2026-09-30）**：`postprocess` 原本按 `(y, x)` 行主序排序，双栏下把左右列交错，chunk 因此跨栏、且同栏上下段永不合并。改为 **XY-cut 阅读顺序**（见 §5.3.2）。缓存无关 | `sidecar/layout_onnx.py` |
 
 > **TSR 缺口的实证与修复（2026-09-29）**：模型驱动工具选择上线后，agentic 路径第一次能触达 `metadata_search`。
 > 问「Which tables appear on page 3?」时，模型正确选择了 `metadata_search(block_type=Table, page=3)`，
@@ -58,7 +63,7 @@
 | 模块 | 状态 | 位置 |
 | :--- | :--- | :--- |
 | 解析管线（版面 → 按块取字 → 分块） | ✅ 真实 PDF 38 页验收 | `sidecar/pipeline.py` |
-| 版面分析 PP-DocLayout ONNX | ✅ 加速器优先，实测 CoreML 0.17s/页 | `sidecar/layout_onnx.py` |
+| 版面分析 PP-DocLayout ONNX | ✅ **默认纯 CPU**（会话每篇重建时更快，见 §5.4 改判）；加速器 opt-in | `sidecar/layout_onnx.py` |
 | 版面可视化报告 | ✅ 逐页 PNG + 自包含 HTML | `scripts/visualize_layout.py` |
 | 按块取字（PyMuPDF 文字层优先） | ✅ | `sidecar/layout.py` |
 | **表格结构识别（TSR）** | ✅ 真实论文表格转 Markdown **1/10 → 9/10**；行列/表头由 TSR 给出，单元格取字走文字层。**已知残留**：单元格文字串列（`[169]` 被切到相邻列）、无表头时表头行重复成数据行、表头框分数仅 0.22 时易漏检。**未做**：孤立行列剔除 / 跨页合并 / colspan-rowspan 还原 | `sidecar/tsr_onnx.py`、`sidecar/table_grid.py` |
@@ -69,12 +74,18 @@
 | **模型驱动的工具选择** | ✅ 模型在 4 个工具里自选；未知工具名剔除、失败回退确定性计划。实测选对 `metadata_search(block_type=Table, page=3)` | `internal/agent/loop.go`、`internal/agent/ollama.go` |
 | **进度通知** | ✅ `ipc.Server.Notify`（无 id 的 JSON-RPC 通知）；`index` / `ask` 逐阶段上报：hash / skipped / parse / parsed / stored / persisted / agent | `internal/ipc/jsonrpc.go` |
 | **文档管理 RPC** | ✅ `documents`（含 md5/页数/索引时间/实际 chunk 数）、`forget`、`status`（各子系统健康 + 哪些没探测） | `cmd/freerag/main.go` |
+| **分块检查器 RPC** | ✅ `chunks`（分块 + **bbox（页内 PDF 点）** + 每页块数 + 总数）、`page`（原文某页渲染成 PNG + 页尺寸 pt） | `cmd/freerag/main.go`、`internal/parser/service.go`、`sidecar/parse_server.py` |
 | **桌面端界面（产品形态）** | ✅ 文档列表 + 拖放/选择文件 + 提问 + 引用 `[n]` 跳转 + 实时进度；草稿转义后进 DOM | `desktop/renderer/` |
+| **知识库两级 + 分块检查器** | ✅ 知识库选择页 → 库内（文档列表 + 分块检查器）；左=原文页渲染 + bbox 高亮，右=分块列表，两边点击互相定位；翻页是选择的一部分 | `desktop/renderer/`、`sidecar/parse_server.py` |
 | **安装器（electron-builder）** | ✅ **772 MB**，含随包 Python 运行时，安装即用；路径全部落到 userData、Qdrant 随包自启；干净环境实测可解析新文档 | `scripts/build-installer.sh`、`scripts/fetch-python-runtime.sh` |
 | Agentic 循环（medium） | ✅ 3 轮 SCA + 重写；含提取式兜底 | `internal/agent/loop.go` |
 | **SCA 用 Laya（§6.6）** | ✅ 类型化决策，只喂 draft；约 104ms/次 | `sidecar/laya.py`、`internal/agent/checker.go` |
 | 生成 LLM（Qwen3-4B via Ollama） | ✅ 含 `num_ctx` 与 prompt 预算护栏 | `internal/agent/ollama.go` |
-| **问答延迟（推理 token）** | ✅ `FREERAG_THINK` 默认关闭（单次调用 29.7s → **1.9s**）；后台预热；`FREERAG_KEEP_ALIVE=30m`。端到端首次提问 **113s → 15.4s**；顺带修掉"推理吃光预算返回空答案" | `internal/agent/ollama.go`、`cmd/freerag/main.go` |
+| **问答延迟（推理 token）** | ✅ `FREERAG_THINK` 默认关闭（单次调用 29.7s → **1.9s**）；后台预热；`FREERAG_KEEP_ALIVE=30m`。顺带修掉"推理吃光预算返回空答案" | `internal/agent/ollama.go`、`cmd/freerag/main.go` |
+| **答案流式输出** | ✅ 增量经 JSON-RPC 通知推送，前端边收边渲染（实测 360 个增量 / 646 字符）；`thinkFilter` 处理推理标签**跨块切分** | `internal/agent/ollama.go`、`loop.go`、`desktop/renderer/app.js` |
+| **答案详尽度** | ⚠️ prompt 已改为要求详尽（147 → **646 字符**，端到端 15.4s → **83s**）；`num_predict` 512→1024、预算预留 768→1280。**但变长的一部分当前是空话**，根因是标题分块，见 P0-2 | `internal/agent/loop.go` |
+| **多知识库** | ✅ 注册表 + 每库独立索引与 Qdrant 集合（`freerag_<id>`）；**懒加载**（列表不打开任何库）；旧单索引自动迁移为「默认知识库」；`kb.list/create/rename/delete`。实测隔离正确、删除会丢弃向量集合（含一个只在"未打开即删除"时才暴露的泄漏 bug） | `internal/kb/`、`cmd/freerag/kb.go` |
+| **会话 / 对话** | ✅ 会话创建时绑定知识库且不可更改；对话是会话下的消息线；历史由外壳写入 `chats.json`（原子写、损坏时报告而非覆盖） | `desktop/main.js`、`desktop/renderer/` |
 | **桌面端闲置超时** | ✅ `ask` 5 分钟静默 / 30 分钟上限；内核任何消息重置时钟；内核在调模型前先发 `thinking` 进度（原固定 60s 超时正好卡在首次模型调用的静默期） | `desktop/main.js` |
 | 上下文预算（4K–8K） | ✅ 显式 `num_ctx` + 按 token 换算的字符预算 | `internal/agent/loop.go` |
 | **解析缓存（sidecar）** | ✅ 实测重复解析 21.5s → **0.18s**。键含**路径 + 大小 + mtime**，因此 `cp -p` / rsync / 恢复备份保留时间戳时可能假命中 | `sidecar/cache.py` |
@@ -83,6 +94,21 @@
 | 模型下载与 manifest | ⚠️ 脚本可用，未与安装器集成 | `scripts/download-models.sh` |
 | **模型存储去重** | ✅ 硬链接，实测 7.1 GB → **4.4 GB** | `scripts/setup-ollama.sh` |
 | 全链路与对比测试脚本 | ✅ | `scripts/e2e_pipeline.py`、`scripts/compare_retrieval.py` |
+
+**分块检查器（2026-09-30）**：知识库视图改为两级（选择页 → 库内），库内新增检查器，把「一块 chunk」和「它来自原文的哪一片」放在同一屏。
+
+| 决定 | 理由 |
+| :--- | :--- |
+| **原文在 sidecar 渲染**（`method_render`），不在 Electron 里嵌 PDF 阅读器 | bbox 是按 **PDF 点**（`page.rect` 空间，左上原点）度量的。页尺寸（pt）随 PNG 一起返回，前端只做百分比换算 —— **一个坐标系**，Electron 侧永不打开 PDF。同时复用已随包分发的 PyMuPDF，不引入新的 JS 依赖 |
+| 高亮框用**百分比**而非像素 | 框跟着图缩放，不需要 resize 监听，也不需要知道图片的像素尺寸 |
+| **`chunks` 一次返回整篇**，本地过滤 | 翻页与「只看本页」是本地重渲染，不等内核。翻页真正需要的是一张渲染好的页图，而不是另一份列表 |
+| **`page` 只过滤列表，不过滤每页计数** | 翻页箭头必须先知道有哪些页，才谈得上选一页 |
+| **翻页是选择的一部分** | 点第 7 页的 chunk 会自动翻到第 7 页。一个高亮不出任何东西的 chunk，正是这个界面要防止的事 |
+| 文件不在了**明说** | 原文路径来自清单记录，文件可能已被移动。显示「原文无法显示：…」而不是把框压在空白页上——后者看起来像数据坏了，而不是文件没了 |
+
+**前置条件本来就具备**：`sidecar/chunking.py` 的 `Block.to_chunk` 一直把 `bbox` 写进 chunk metadata，索引也一直存着它（实测 **1302/1302** 个 chunk 带 bbox），所以**不需要重建索引**。
+
+验证：真实库 `2603.15594v1.pdf`（15 页 / 138 块）第 1 页 **8/8** 个 chunk 的 bbox 落在 612×792 pt 页内、0 越界；截图确认高亮框圈住的正是右侧选中 chunk 的文字。测试：Go 6 项（`chunkBox` 8 个用例 + `chunks`/`page` 的取参与错误路径），Python 6 项（渲染 / 改 dpi 不改 pt / 1-based / 越界 / 缺文件 / 坏参数）。
 
 **Laya 接入的实测收益**（这是本轮最大的一项）：
 
@@ -228,7 +254,7 @@ Laya 的 provider 结论也值得记：**CPU 单线程 104ms 完胜 CoreML 434ms
 
 | 组件 | 推荐模型 | 参数量/量化 | 预估占用 | 运行设备 |
 | :--- | :--- | :--- | :--- | :--- |
-| 版面分析 | **RAGFlow `layout.onnx`**（PP-DocLayout 系，YOLOv10，10 类） | 75MB，输入 1024×1024 | ~75MB 权重 | **加速器优先**；实测 CoreML **0.17s/页**，纯 CPU 1.9s/页（1 线程）～7.8s/页 |
+| 版面分析 | **RAGFlow `layout.onnx`**（PP-DocLayout 系，YOLOv10，10 类） | 75MB，输入 1024×1024 | ~75MB 权重 | **默认纯 CPU**（每页 2.0s，但建会话只要 0.14s）；CoreML 每页 0.25s 却要 6.9s 建会话 —— 会话每篇重建时 CPU 快 1.4×（2026-10-01 改判） |
 | 文本提取（主） | **PyMuPDF / MuPDF 文字层** | 无模型 | CPU 侧 ~0 | **CPU**（毫秒级） |
 | 文本提取（兜底） | **GLM-OCR**（备选 EasyOCR / Tesseract） | 0.9B (FP16/INT4) | ~2GB VRAM（临时） | GPU（**仅扫描件**时动态加载） |
 | 表格结构识别 TSR | **RAGFlow `tsr.onnx`**（TableStructureRecognizer，6 类标签） | 小型 ONNX 检测模型 | <0.5GB | **CPU**（可 GPU 加速） |
@@ -335,12 +361,111 @@ Laya 的 provider 结论也值得记：**CPU 单线程 104ms 完胜 CoreML 434ms
 | 结论 | 数据 |
 | :--- | :--- |
 | 原计划"PP-DocLayout-S，14.5ms/页"**过于乐观** | 实际权重 75MB、输入 1024×1024，属 L 级而非 S 级 |
-| **必须优先使用加速器** | CoreML **0.17s/页** vs 纯 CPU 1.9～7.8s/页（同页、同输入） |
+| ~~必须优先使用加速器~~ **（2026-10-01 推翻，见下）** | CoreML **0.17s/页** vs 纯 CPU 1.9～7.8s/页（同页、同输入）——**每页**仍成立，但按**每篇文档**算不成立 |
 | CoreML 结果可信 | 与 CPU 输出**逐框一致**（9/9 区域完全相同），非近似 |
 | CPU 上线程越多越慢 | 1/2/3/4 线程 = 1.9/3.7/5.4/7.4s/页（算子不并行，线程只增竞争） |
 | 输出质量 | 段落级语义块；同一份 4 页 PDF：**31 chunks**（PP-DocLayout）vs **123 chunks**（PyMuPDF 行级碎片） |
+| **内存地板主要不是权重** | 权重只 76MB，而 session 建好就占 **646MB**（CoreML）/ **184MB**（纯 CPU）——CoreML 用 **+460MB** 换 8× 速度 |
+| 解析峰值内存不随页数增长 | 1/5/15 页 = 792/919/932MB，是预热而不是逐页泄漏 |
 
-结论：**版面检测走加速器（CoreML/DML/CUDA），无加速器时必须限制 CPU 线程数为 1**；Windows/Linux 需验证 DirectML/OpenVINO 或改用更小的版面模型。
+> **改判：默认改为纯 CPU（2026-10-01）**。上表"每页"结论没错，错在**按每页比较**——真实开销按**每篇文档**结算，而会话是**每篇重建**的（`pipeline.make_detector()` 每次 new 一个 detector，`layout_onnx._load()` 只缓存到实例上）。实测：
+>
+> | 建会话 | 每页推理 | 每篇（8 页/3 篇均值） |
+> | :--- | :--- | :--- |
+> | CoreML（657/681 节点编译给 ANE） | 0.25s | **7.70s** |
+> | 纯 CPU（1 线程） | 2.04s | **5.53s** |
+>
+> 关键在于**建会话本身**：CPU 只要 **0.14s**（把 72MB 模型读进来），CoreML 要 **6.90s**（分包 + 编译成 ANE 程序）。CoreML 每页快 8×，但为每篇文档先付 6.9s 固定费——8 页以下全亏。60 篇语料因此从 8.43s/篇降到 CPU 的 5.53s/篇（约 1.5×）。
+>
+> 并且 CoreML 的编译**全局串行**：4 个进程各编译一次同一模型，是在排同一个编译器服务的队，实测墙钟 4×（一点没省），还各占 836MB。
+>
+> 于是默认 `FREERAG_ONNX_PROVIDERS=cpu`（`layout_onnx.default_providers()`，`tsr_onnx` 共用同一设置）。
+>
+> **会话缓存已落地（2026-10-01）**：`layout_onnx.session_for()` 按 `(模型文件, 解析后的 providers, CPU 线程数)` 做**进程级**注册表 + 锁（`threading.Lock`，双重检查；`tsr_onnx` 复用同一注册表但带自己的 options builder）。`LayoutDetector._load()` 从"每实例一份"改为取用注册表。四道测试守住"只构建一次"，含 8 线程并发只编译 1 次的用例。
+>
+> 缓存前后的全量对照（60 篇 PDF / 234 页 / `--no-cache`）：
+>
+> | 配置 | 总耗时 | 每篇 |
+> | :--- | :--- | :--- |
+> | CoreML，无缓存 | 505.6s | 8.43s |
+> | CPU，无缓存 | 539.2s | 8.99s |
+> | **CoreML + 会话缓存** | **85.9s** | **1.43s（5.9×）** |
+> | CPU + 会话缓存 | 539.2s（不变） | 8.99s（它的会话只要 8.4s，没有可省） |
+>
+> **所以缓存让结论再翻一次**：CoreML 从"每篇亏 6.9s"变成"每页快 6×"，比 CPU 快 **6.3×**。默认**仍留在 `cpu`**（用户明确要求），但代码注释已写明 `auto` 才是缓存后该用的配置，改一行即可——`FREERAG_ONNX_PROVIDERS=auto` 也随时能做同条件对比。
+>
+> 另：**解析结果的缓存 key 不含 provider**（按 `md5(文件)+选项`），而两种 provider 输出逐框一致，所以切 provider **不需要**重新索引，也**不需要**升 `CACHE_VERSION`。
+
+结论：**默认走纯 CPU，CPU 线程数固定为 1**（算子不并行，线程只增竞争）；加速器留作 opt-in（`FREERAG_ONNX_PROVIDERS=auto`），在会话缓存落地后应当改回。Windows/Linux 需验证 DirectML/OpenVINO 或改用更小的版面模型。
+
+#### 5.4.1 图像内容摘要（VLM，2026-10-01）
+
+**动机是测出来的，不是猜的**：在 test1（5 篇论文，11 个 `Figure` 块）上逐块量"图注框内文本层有多少字"——**11/11 都有**（275–2,754 字）。图里的**词**早就在库里了；缺的是图的**意思**：哪条曲线在上、哪个答案被判错、流程怎么走。所以摘要只补语义。
+
+**只处理 `Figure` 块，不按位图触发**：同一批页面有 4–38 个位图，但布局模型只判出 0–12 个 Figure；其余是 logo、装饰线、零散位图，为它们付视觉模型的钱会远超有用功。
+
+**选型（实测）**：
+
+| | qwen2.5vl:3b | qwen3-vl:4b |
+| :--- | :--- | :--- |
+| 体积 / 常驻 | 3.2GB / 4.32GB | 3.3GB / 3.53GB |
+| 冷加载 + 首图 | **59.8s** | 101.9s |
+| 每张（串行） | **36.2s** | **183–222s** |
+| 思考 token | 0 | **1319 字，`think:false` 无效** |
+| 并发 4 | 稳定，**2.75×** | 崩溃 |
+
+→ **选 `qwen2.5vl:3b`**。质量：11 张里约 9 张可用，唯一明显失败的是编造了不存在的错误类别。
+
+**它已经全在 GPU 上**（所以"换 GPU"不是可用杠杆）：`/api/ps` 显示 100% VRAM，日志 `load_tensors: offloaded 37/37 layers to GPU`，且 **视觉塔也在 Metal**（`clip_ctx: CLIP using MTL0 backend`）。时间构成（热图 18.3s）：**prefill 0.1s**（同图重发命中前缀缓存）+ **生成 18.2s**（155 tok @ **8.8 tok/s**）——即成本几乎全在生成，而这正是环境固定的那个上限。
+
+**并发曲线（10 张）**：1 / 2 / 4 / 6 路 = 361.7 / 258.3 / **131.5** / 127.1s，即 1.0 / 1.4 / **2.75×** / 2.85×。拐点在 4（6 只多 4%）。**这个模型能并行**，与版面模型相反——因为单请求是延迟主导。
+
+**实现**（`cmd/freerag/vision.go`）：
+
+- **追加而非替换**：`text = 抽取文本 + "\n【图内容】" + 摘要`，元数据带 `figure_summary` / `figure_summary_model` 标为 derived。精确串（`gpt-4-0613`、`Cohen's Kappa`）留给 `grep_search`。
+- **数值在代码里剥掉，不靠 prompt**：模型被明确要求"不要引用数值"后**照样引用了**（`93.16%`、`κ=0、H=0.52`，那次恰好读对）。索引里的错值没有读者，所以由 `stripNumbers` 强制：按"字母-数字 run"切分，含字母的 run 是标识符（保留），纯数字/单位的 run 是数值（删除）——按空白切分在中文下无效（`93.16%，davinci` 是一个 token）。
+- **进程级闸门（4）**：批索引会同时处理多篇文档，所以额度不能放在单篇上，否则 4×4=16 个请求打向同一个模型。
+- **磁盘缓存**：key = `sha256(图像字节 | 模型 | prompt 版本 | max_tokens)`。必须落盘，因为解析缓存在这一阶段**之前**——重索引未改动文档会命中解析缓存、根本走不到这里，内存缓存会导致每次重建都重新问模型。字节里含分辨率，所以改 `MaxSide` 会**故意**失效（小图可能给出不同描述）。
+- **`num_predict=155` 是上限不是定长**：这是该模型实际写出的长度，不补不截。
+- **超时单独放宽到 10 分钟**：实测 4 张并发时，一次回答冷加载 + 4 路并行的等待超过了生成器默认的 3 分钟，丢了一张（`context deadline exceeded`）。丢图只是少一段描述（抽取文本仍在），但可以避免。
+
+**实测端到端**（`2403.03558.pdf`，4 个 Figure 块，并发 4）：解析 37.6s + 描述 **180.1s（45s/张，3/4 成功）**，追加后文本已无数值。按此推算 test1 的 11 张约 2–3 分钟。
+
+**已知缺口**：`method_render` 的裁剪 + `max_side` 降分辨率（按 DPI 换算，不是渲染后再缩）只有活测覆盖，没有 Python 单测。
+
+> **跨平台约束（2026-09-30 补）**：真正卡住的是**没有加速器的机器**（老版本 macOS / Intel Mac / 未配 DML 的 Windows），那里就是上表那 2.5s/页（38 页 ≈ 95 秒）。所以"换更大的模型"是在最好的机器上变好、在最差的机器上变坏——**选型基准应当是 CPU onnxruntime，而不是本机的 CoreML 成绩**。同理，任何新模型都必须是**静态形状、单输入**的 ONNX：CoreML EP 不支持动态形状，PaddleX 导出的 3 输入（image/scale/im_shape）形态很可能整段被拒、静默掉回 CPU。不引入 Paddle 运行时（+421MB/平台，且要按平台各自可用的 wheel）。
+
+**CPU 路径调优实测（2026-09-30，每配置独立进程、6 页、各跑 2–3 次）**：
+
+| 配置 | 每页 | 峰值 |
+| :--- | :--- | :--- |
+| **intra=1 inter=1（现行）** | **1.91–1.92s** | 1260 MB |
+| intra=1 inter=0 | 1.96–2.07s | 1262 MB |
+| intra=4 | **7.27–7.35s** | 1291 MB |
+| intra=0 inter=0 parallel（ORT 默认） | **8.05–8.13s** | 1140 MB |
+| intra=1 inter=1，**`enable_mem_pattern=False`** | **1.94–1.96s** | **1009–1014 MB** |
+| intra=1 inter=1，`enable_cpu_mem_arena=False` | 1.93–1.98s | 1285 MB（无收益） |
+
+- **线程数已经是天花板**：现行 `intra=1` 最快；多线程慢 3.8–4.2×，与既有结论一致（算子不并行）
+- **`enable_mem_pattern=False` 免费省 ~250MB（1260 → 1010MB），耗时不变**；六个配置各测 6+ 次，检测结果**逐框一致**（所以不需要 bump 缓存/指纹）。已只在 CPU provider 下启用
+- **`enable_cpu_mem_arena=False` 不给收益**（1285MB）且是唯一出现过一次崩溃的配置，不采用
+- 加速器路径上该 flag 无差别（0.22s/页，峰值在噪声内），故不做全局设置
+
+**生成速度的 A/B 实测（2026-09-30，答案流式输出）**：本机为 MacBook Air（M5，10 核 4P+6E，16GB，无风扇）。同一 200-token 请求、每个配置两轮：
+
+| 变量 | 取值 | 稳态 tok/s |
+| :--- | :--- | :--- |
+| `num_thread` | 1 / 4 / 8 / 10 | 6.4–7.0（无差别） |
+| `num_batch` | 512 / 1024 | 6.4–8.5（噪声内） |
+| `num_ctx` | 2048 / 4096 / 8192 | 6.4–8.4（无差别） |
+| `num_gpu` | 0（纯 CPU）/ 99（Metal） | **8.2 / 7.3** —— CPU 略快 |
+| `OLLAMA_FLASH_ATTENTION` | 0 / 1 | 6.5–7.5（无差别） |
+| `OLLAMA_KV_CACHE_TYPE` | q8_0 / f16 | 6.4–8.5（无差别） |
+| 常驻内存 | 全套应用常驻 / 全部停掉 | 6.4–8.0（无差别） |
+
+结论：**生成速率 ~6.4 tok/s 是本机环境的固定值，不随任何配置变化**——七个变量、两条后端（Metal 与 4 线程 CPU 一样慢）都试过。prefill 也偏低（226 tok/s）。所以"流式输出慢"不是 SSE/传输层问题（1 token = 1 delta，前缀缓存命中的首字 0.08–0.18s），也调不动。**唯一能动的杠杆是 token 数量**：`PromptCharBudget(8192)` = 20,736 字符 ≈ 6,900 token ≈ 首字前 ~30s 的 prefill（见 §6），以及每轮各自的 prefill+生成。
+
+> **可选的小模型清单（下一步，未做）**：paddlex 的配置目录里有 `PP-DocLayout-S/M/L`、`PP-DocLayoutV2/V3`、`PP-DocLayout_plus-L`、`PP-DocBlockLayout`、`PicoDet-S/L_layout_17cls`、`RT-DETR-H_layout_17cls`；本机只缓存了 `PP-DocLayoutV3`。`paddle2onnx 2.1.0` 在 TUIrag 的 venv 里，所以"导出小模型为静态 ONNX"技术上可行，但**换检测器会作废前面针对当前模型调出来的合并参数**（图注文本模式、`_stacked` 行为、上限），应作为一次独立决策，而不是顺手替换。
 
 ---
 
@@ -362,13 +487,14 @@ PDF
       Equation      → PyMuPDF words；为空则 OCR 兜底
       文字层为空（扫描件）→ OCR 兜底（GLM-OCR / EasyOCR / Tesseract）
  → ④ 语义块组装（携带 page_num / block_type / bbox / font_size / parent_section / source_file）
- → ⑤ 分块：**每个 bbox 块直接作为一个 chunk**（策略 A，不合并，见 5.3）
- → ⑥ 富元数据注入 → 入库
+ → ⑤ 阅读顺序：**XY-cut** 把块排成人的读法（先列后行，见 §5.3.2）
+ → ⑥ 分块：**过滤噪音 → 层级合并**（TUIrag 策略 B，见 5.3 / 5.3.1）
+ → ⑦ 富元数据注入 → 入库
 ```
 
 **关键点**：电子版 PDF 全程 CPU、无需 OCR；**只有扫描件/图片文字才触发 GPU OCR**。这让 §2 中"60s/篇"不再是普遍路径。
 
-**双栏处理**：`_extract_text` 依据 word 的 x 坐标间隙（`max_gap > avg_gap*5` 且 `> 区域宽*0.15`）判断左右栏，分别按 y 分组成行再拼接。
+**栏内取字**：`_extract_text` 依据 word 的 x 坐标间隙（`max_gap > avg_gap*5` 且 `> 区域宽*0.15`）判断块内左右栏，分别按 y 分组成行再拼接——这是**块内**取字顺序，与**块间**顺序（§5.3.2）是两件事。
 
 ### 5.2 表格解析（借鉴 RAGFlow `deepdoc`）
 
@@ -404,40 +530,78 @@ RAGFlow 的表格能力远强于 TUIrag 的"bbox 内按 y/x 排序取字"。其�
 - 重建逻辑（行列排序、孤立行列剔除、表头判定、`__cal_spans`、HTML 生成）**直接移植 RAGFlow `construct_table` 的算法**，与模型无关。
 - 入库同时保留 **HTML**（保结构）与 **描述性文本**（供纯文本检索 / embedding / LLM 阅读）。
 
-### 5.3 分块策略：每个 PP-DocLayout bbox 块 = 一个 chunk
+### 5.3 分块策略：TUIrag 策略 B（层级合并）+ 适度的合并上限
 
-**不做合并/重切**（放弃 TUIrag 策略 B）：PP-DocLayout 检出的**每个 bbox 块直接作为一个 chunk**（对应 TUIrag `_build_chunks_strategy_a`）。理由：BGE-M3 窗口 **8,192 token（≈ 12k 字符，见 §5.5）** 足以容纳单个版面块，无需再合并或按固定字符数重切。
+**2026-09-30 修订**：初版曾"放弃 TUIrag 策略 B、每个 bbox 块 = 一个 chunk"。实测该策略下标题块被当成独立 chunk 索引，逐字命中查询词、优先于正文返回，而正文反倒被挤掉（见 §7 问题 ②）。故改为**移植 TUIrag `_build_chunks_strategy_b`**，把版面块重新合并成阅读单元。
 
-- **块 → chunk 一一对应**：`{text: 该块提取内容, metadata: {page_num, block_type, bbox, font_size, parent_section, source_file}}`。
-- **上下文靠元数据、不靠合并**：TUIrag 用"Title 归组 Section"补章节上下文；这里改为在 metadata 保留 `parent_section`（最近一个 Title），检索/Prompt 组装时按需拼接，不牺牲块粒度。
-- **Table / Figure 与 Caption 不合并**：Caption 作为独立 chunk，或在 metadata 加 `caption` 字段引用最近的 Caption 文本（只挂引用，不改块边界）。
-- **必要保护（三项）**：
-  1. **超限拆分**：单块超过 BGE-M3 窗口（§5.5）时，按句子边界拆成多块，**不截断**（避免丢内容）。
-  2. **超短块合并/挂靠（必做，见 §5.3.1）**：不允许 <N 字符的碎块单独入库。
-  3. **噪音过滤**：同一文本出现 ≥3 次的页眉/页脚、纯页码/装饰符号（`[0-9  •一—-]+`）直接丢弃。
-- **缓存**：`layout cache` + `chunk cache`，key = `md5(path|backend|dpi|threshold)`（无 strategy），按 `file_mtime` 失效。
+- **标题归组 Section**：Title 吸收其后的 Text/Equation（噪声 Caption 跳过），合成一个 `Section` chunk；`block_type` 记为 `Section`，`parent_section` 记为标题自身，标题文字仍可检索，但命中的是一条真实段落。
+- **连续段落缓冲**：连续的 Text/Equation 按 TUIrag `_flush_text_buffer` 合并，直到触达**合并上限**（见 §5.3.1）。
+- **Table / Figure 合并其 Caption**：取紧邻的 Caption —— **在表/图之前或之后都行**（可跨噪声块），合并为 `TableWithCaption` / `FigureWithCaption`。期刊体例把表题写在表**上方**，只向后再看会把表题留成一个单独的一行小 chunk（实测某论文 13 个 `Table` 里 11 个如此）。同样要过 §5.3.3 的闸。
+- **漏标的 Caption 按文本补**（`CAPTION_LABEL_RE`）：检测器会把表题当正文返回（实测某论文 10 个 `Table` 里 4 个如此 → 一个独立成块、一个被下面正文吞掉）。规则是**文本形态 + 紧贴表/图**两条同时成立才改判为 `Caption`：`Table 4:` / `Fig. 3.` / `表 2、` 这类"标签+编号+分隔符"，分隔符是分界线——`Table 4: …` 是图注，`Table 4 shows that …` 是正文。实测该论文命中 17 处，其中 13 处本来就是 `Caption`，另外 4 处正是漏标的那几个，**没有误伤正文**。
+- **噪声 Caption 过滤**：同一文本出现 ≥3 次的 Caption 视为页眉/页脚，直接跳过且不打断合并。
+- **只折叠「同栏、向下」的块**（`_stacked`，见 §5.3.3）：每一条合并规则都要过这道闸。chunk 在原文上画成**一个矩形**，所以它能折叠的块必须占满一个矩形——同一 x 区间（重叠 ≥ 较窄块的 30%）、从上一块**下方**起（容差 6pt）、**同一页**。阅读顺序不等于几何相邻：三栏的作者格是横向读的（左右相邻），左栏底部的下一块是右栏顶部（跳回页面上方），折进去都会得到一个覆盖大片空白的外接矩形。
+- **元数据**：`{page_num, block_type, bbox, font_size, parent_section, source_file}`；合并块额外带 `merged_from`（被吸收块的来源标记）。
+- **多格式入口（2026-09-30 新增）**：`documents.py` 按扩展名分派 —— PDF 走版面检测，`.docx` 直接读 OOXML（`zipfile` + `xml.etree`，标题来自文档自己的 styles，**不靠字号猜**；表格转 Markdown），`.doc`/`.rtf` 走 macOS `textutil`（缺了就给明确报错而不是猜），`.txt`/`.md` 自己读（UTF-8 → UTF-16 → GB18030 回退，md 的 `#` 才算标题）。非 PDF 的块 `page_num=1`、bbox 全零 —— 这不是占位：chunking 的几何闸把零宽框读作"无需判断"而放行，正是可重排文档想要的行为。
 - **内存管理**：每页处理完 `del pix` + `gc.collect()`，避免页面位图累积。
-- **暂不引入父子块索引（parent-child）**：当前为**单层扁平索引**，每个 bbox 块直接入库（不借鉴 TUIrag 的 HierarchicalNodeParser / 子块检索→父块回溯）。若后续实际出现召回不足，再评估是否加。
+- **暂不引入父子块索引（parent-child）**：当前为**单层扁平索引**；若后续实际出现召回不足，再评估是否加。
 
-#### 5.3.1 超短块合并算法（借 RAGFlow 判据 + TUIrag 缓冲）
+#### 5.3.1 合并上限与拆分（两类阈值）
 
-**短块定义**：文本 < 40 中文字符 / < 20 英文词（或 < 32 tokens）。
+两个阈值分工明确、不可互换：
 
-**处理优先级**（前一步成功即止）：
+| 阈值 | 值（zh / en / mixed） | 作用 |
+| :--- | :--- | :--- |
+| **合并上限** `MERGE_MAX_PROFILE` | 2000 / 4000 / 3000 字符 | 层级合并把 chunk 长到多大就收口、另起一块 |
+| **硬拆分阈值** `MAX_CHARS_PROFILE` | 8000 / 30000 / 12000 字符 | 单块超过 BGE-M3 窗口时才按句子边界拆分（§5.5），**不截断** |
 
-1. **类型豁免**：`layout_type ∈ {Title, Table, Figure, Equation}` 的块不参与合并/丢弃（RAGFlow `usefull()` 的 layout_type 分支，`pdf_parser.py:1550-1557`）——标题天然短但重要。
-2. **软挂靠（首选）**：短块挂到相邻主块，**只写 metadata 的 `attached_to`，不改块边界**（贴合"每个 bbox 块 = 一个 chunk"）。条件需同时满足：
-   - 同一 `parent_section`；
-   - 垂直相邻：与上/下块间隔 < `mean_height × 1.5`（RAGFlow `_naive_vertical_merge:1047`）；
-   - x 重叠 ≥ `min(width_a, width_b) × 0.3`（RAGFlow `:1051-1054`）；
-   - 上一块结尾非终止标点（`。？！?` / 英文 `.!?`）——RAGFlow `feats:1064-1065`。
-3. **缓冲合并（次选）**：连续同类型短块（`Text`/`Equation`）在同一 `parent_section` + 同页时，按 TUIrag `_flush_text_buffer` 合并为一个块。
-4. **丢弃（兜底）**：以上都失败时按 RAGFlow `__filterout_scraps` 的判据（`:1543-1601`）：
-   - **保留**：宽度 > 页宽/3，或 高度 > `mean_height`（`usefull()`）；
-   - **丢弃**：平均宽度占比 `mw/pw < 0.35` 且 `mw ≤ 200`——页眉/页脚/页码类。
-5. **合并后不截断**：合并结果若超 BGE-M3 窗口（§5.5），按句边界拆分（`_split_at_sentences`）。
+**上限是"一节一块"与"向量不被稀释"之间的折中**：8192-token 窗口是硬顶，不是目标；但上限太小，同一子标题下的内容会被切成好几块。实测 6 篇论文、111 个有正文的小节，逐步抬高上限（总 chunks / 正文 chunks / "一节只剩一块"的小节数）：
 
-**为什么不照搬 RAGFlow 的垂直合并**：`_naive_vertical_merge`（`:1013`）依赖 `mean_height` / `mean_width` 等版面统计与大量中英标点特征，移植成本高；且 `_concat_downward`（`:1117`）在 `__call__` 路径**已被 early return 禁用**（只做排序，`:1119`），`_merge_with_same_bullet`（`:1267`）亦无调用者——说明其跨行拼接曾有稳定性问题。故**只取其碎片判据，不取其合并实现**。
+| 上限 | chunks | 正文 chunks | 一节一块 |
+| :--- | :--- | :--- | :--- |
+| 1200 | 618 | 500 | 28 |
+| 2000 | 454 | 344 | 37 |
+| **3000** | **386** | **276** | **45** |
+| 4000 | 361 | 251 | 48 |
+| 6000 | 334 | 225 | 49 |
+| 12000 | 334 | 225 | 49 |
+
+**3000 是拐点**：再往上几乎不再有收益（4000→12000 只多 1 个小节），因为此时还在拆一节的是"被表/图打断"或"跨页"，不是上限。换算成 token 约 2000（中文）/ 1500（混排）/ 1000（英文），最多占窗口的 1/5，一个 chunk 仍是一个主题。
+
+**过滤与收尾**（对齐 TUIrag 与 §5.3）：
+1. **噪音过滤**：同一文本出现 ≥3 次的短块、纯页码/装饰符号、页眉页脚带内的短块直接丢弃。**但内容类型（`Title`/`Table`/`Figure`/`Equation`/`Caption`）不参与"重复即噪音"**——论文标题同时也是每一页的页眉（同一串文字、相反含义），按重复计数会把它删掉（实测：某论文标题被删、7 个页眉 Reference 反而留存）。
+2. **碎片丢弃**：最终 < 10 字符且不含 CJK 的 chunk 不入库（TUIrag 的最后一步），避免"（1）"这类表号单独成块。
+3. **不截断**：合并结果若超硬拆分阈值，按句边界拆（`_split_at_sentences`）。
+
+**为什么不再取 RAGFlow 的垂直合并判据**：初版曾借 `_naive_vertical_merge` 的 `mean_height` / x 重叠 / 终止标点等判据做软挂靠。实测这些判据在没有正确块序时并不能补救（真问题在顺序，见 §5.3.2），反而会拦住"标题 + 紧邻正文"这类真正该合并的情况。策略 B 的合并判据收敛为「类型 + **同栏向下**（§5.3.3） + 合并上限」，顺序由 §5.3.2 保证。
+
+#### 5.3.3 为什么只折叠「同栏向下」的块
+
+**症状**：chunk 的外接矩形盖住它其实没占的地方。双栏论文里"左栏最后一段 + 右栏第一段"在阅读顺序上确实相邻，折成一个 chunk 后 `bbox` 是从左上到右下的一大片，前端在原文上画出来就是一大块几乎空白的高亮。
+
+**实测**（6 篇论文、272 个合并 chunk）：**230 个**是同栏内向下堆叠，外接矩形就等于它们占的区域；**42 个**不是，其中 **40 个**的外接矩形被真实文字覆盖不到 60%（最差 0.07）。问题集中在 15% 的合并上，全部由"顺序相邻 ≠ 几何相邻"造成。
+
+**三种做法**：
+
+| 做法 | 结论 |
+| :--- | :--- |
+| **只折叠同栏向下的块**（采用） | 每个 chunk 都是紧致矩形，前端"一个 chunk 一个框"即诚实；代价是跨栏续写的那一段被切成两块 |
+| 保留跨栏合并，前端按来源矩形画（试过） | 能避开空白，但一个 chunk 变成 N 个框；更糟的是"按顺序去掉上下边"这条规则碰到**左右相邻**的框会同时去掉两者的上下边，画出来只剩竖线（实测 1 页里 3 栏作者格就是这样） |
+| 换版面模型 | **不必**。检测器给的块是对的（分栏正确、读序修好后顺序也对），错的只是把它们折成 chunk 的规则 |
+
+**跨页也不折**：`bbox` 是**页内坐标**，把第 N 页的框与第 N+1 页的框并起来是两个坐标系相加——画在第 N 页上覆盖不到任何东西，而 chunk 文本却带着后一页的内容。
+
+#### 5.3.2 块的阅读顺序：XY-cut（双栏的根因）
+
+**模型不返回阅读顺序**：本项目的版面模型是从 RAGFlow 移植的 YOLOv10（`layout.onnx`），`postprocess` 的输出先按类别分组、再按置信度排列（实测某页原始顺序为 0.98/0.97/0.96…），所以**顺序必须由我们自己施加**。
+
+**为什么行主序不行**：初版按 `(y, x)` 排序，等价于"从上到下一行行扫"。这只对单栏成立；双栏下它把左右列交错，于是**连续的块变成左右相邻**（合并后 chunk 跨栏），而**同一栏上下相邻的块被隔开**（永远不合并）。这正是"左右块被合在一起、上下反而不是同一块"的原因。
+
+**XY-cut**：取一块区域里最宽的空白带把它切开、递归处理——先试竖直切（列），再试水平切（行）；都切不动就退回 `(y, x)`。
+- **先竖切**：水平切会在"两栏恰好在同一高度都空行"时拦腰切断双栏区，那正是要避免的交错。
+- **全宽块（标题/摘要）自然正确**：它横跨栏间空隙，竖切被它挡住 → 先水平切把它分离出来 → 再对下方的双栏区竖切。
+- 空白带小于 `MIN_READING_GAP`（6 pt，约小于一行行距）不算切分，避免在行间乱切。
+
+**实测**（72 个真实页面，"跨栏跳变"次数）：`111 → 44`；双栏论文单页 `7–13 → 1`。唯一变差的 5 页是把页顶两个页眉 `Reference` 的先后调换了（±1，无影响）。
 
 ### 5.4 语言与实现边界
 
@@ -462,9 +626,9 @@ RAGFlow 的表格能力远强于 TUIrag 的"bbox 内按 y/x 排序取字"。其�
 | 中英混排 | ≈ 2.0 | **≈ 12,000–16,000 字符** | 按文档语言分布取值 |
 
 - **本项目默认硬上限**：取中英混排保守值 **≈ 12,000 字符**（纯中文文档取 ≈ 8,000，纯英文取 ≈ 30,000）。
-- **上限 = 超限拆分阈值**（不是目标块大小）：既然每个 bbox 块直接作为一个 chunk（§5.3），块大小由版面结构决定、通常远小于上限；8,192-token 换算值仅用于**单块超限时拆分**。个别异常大的版面块（如整页正文）拆到该阈值以内即可。注：块过长会稀释 embedding 语义、降低召回精度，必要时可对超大块主动降低阈值。
+- **上限 = 硬拆分阈值**（不是目标块大小）：8,192-token 换算值仅用于**单块超限时拆分**（§5.3.1），块大小由上方的**合并上限**决定，通常远小于此值。个别异常大的版面块（如整页正文）拆到该阈值以内即可。
 - **精确做法**：用 BGE-M3 自带 tokenizer **按 token 计数**（不要用字符估算）；字符换算仅用于无 tokenizer 的快速回退。
-- **同步影响**：§5.3 的"超限拆分"与"超短块合并"阈值、检索 `top_k` 与上下文组装预算都应据此对齐。
+- **同步影响**：§5.3.1 的「合并上限 / 硬拆分阈值」、检索 `top_k` 与上下文组装预算都应据此对齐。
 
 ### 5.6 解析缓存分层（策略已定，**Tier 1 未实现**）
 
@@ -503,7 +667,7 @@ Tier 2  合并 + 分块      → 永远全文档重跑（0.022s/38页）   ✅ �
 ```
 key = md5(位图)
     + 检测器身份   ← 模型文件哈希 + 执行 provider（CoreML / CPU / DML）
-    + 检测参数     ← dpi, score_threshold, NMS_IOU, CROSS_CLASS_COVER_RATIO
+    + 检测参数     ← dpi, score_threshold, NMS_IOU, CROSS_CLASS_COVER_RATIO, CONTAINED_RATIO
     ✗ 不含 profile / max_chars / max_pages
 ```
 
@@ -612,7 +776,7 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 | `hybrid_search` | 语义 + 关键词混合召回，主力检索 | `query`, `k?` | top-k chunk（score / doc / page / block_type） |
 | `grep_search` | 字面 / 正则精确匹配：术语、编号、专有名词、代号 | `pattern`, `regex?`, `k?` | 命中行及所属 chunk |
 | `list_chunks` | 按 `doc_id`（+`page`）顺序枚举，用于浏览结构与回读原文 | `doc_id?`, `page?`, `offset?`, `limit?` | chunk 列表（分页） |
-| `metadata_search` | 按 metadata 字段过滤（不依赖全文匹配） | `doc_id?`, `block_type?`, `page?`, `source_file?`, `limit?` | 匹配的 chunk 列表 |
+| `metadata_search` | 按 metadata 字段过滤（不依赖全文匹配）。**只有两个字段**（2026-09-29 收窄，见下方补记） | `filters: [{key, op, value}]`（`key` ∈ `doc_id` \| `indexed_at`）、`logic?`, `limit?` | 匹配的 chunk 列表 |
 
 设计要点：
 
@@ -621,6 +785,18 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 - **`list_chunks` 是安全网**：配合 §6.6"只喂 draft"，模型失去回看原文的能力；`list_chunks` 让它按页回读（对应 RAGFlow 的无损 `Kbinfos` 证据池）。
 - **预算**：4 个工具的调用合计仍受 `ActionMaxTurns = 8` 约束（§6.1）。
 - **职责边界**：工具只负责取证据；`draft` 由生成 LLM 产出、`verdict` 由 Laya 给（§6.3 / §6.6）。
+- **`metadata_search` 收窄为两个字段（2026-09-29 补记）**：移除 `block_type` / `page` / `source_file`，改为 `filters: [{key, op, value}]`，`key` 为 enum（`doc_id` / `indexed_at`），算子整set沿用 RAGFlow 语义，时间按 RAGFlow 规则用 `start with`。
+  - **动机（实证）**：`doc_id` 原是自由字符串、描述只有 "document id"。问「赵慧为作者的论文有哪些」时，模型**编造**了一个取值 `doc_id=author_zhao_hui`（一个长得像作者键的假 doc_id）→ 0 命中 → SCA 判 SUFFICIENT → 第 1 轮退出 → 答案「没有关于赵慧为作者的论文信息」。而**库里 5 篇论文赵慧（Hui Zhao，华东师大）全是作者**。用拼音问**逐字复现**同样三步。
+  - **代价**：`block_type` 过滤能力消失（`list_chunks` 仍能按页/按 doc 浏览）。
+  - **仍未修（重要）**：见下条。
+- **空证据池永不判充分（2026-09-29 同日修复）**：`LayaChecker.Check(ctx, question, draft string, _ []store.Hit)` 按 §6.6 设计**看不到 evidence**，它被问的是"这份草稿有没有回答问题"——而"证据里没有"的草稿**确实回答了**（实测 Laya 给 **0.93** 置信度 sufficient）。**它没答错，是问错了。**"看没看过语料"这个事实住在 `len(evidence)` 里，所以守卫放在 `Loop.Run`（evidence 在作用域内）：空池直接判 `INSUFFICIENT` 且**不咨询 checker**，trace 写 `no evidence to judge; the checker is not asked`。`CoverageChecker` 一直有这道守卫（`if len(evidence) == 0 { return VerdictInsufficient }`），Laya 没有。
+  - 配套 ①：`renderAttempts` 把"本轮已试过什么"（**含返回 0 的调用**）写进下一轮规划提示词。系统提示词早就写着"不要重复已做过的调用"，但**从没说过那些调用是什么**——证据为空时这个遗漏正好致命，因为那时提示词里没有任何别的线索，而"刚返回 0 的那个调用"就是模型最可能的下一个动作。
+  - 配套 ②：`runTools` **确定性拒绝完全相同的重复调用**（在预算检查之前）。实测：即使提示词把该调用列出来并标注"returned nothing"，模型在第 3 轮**仍然重复了**。重复不可能带来新信息（一次 run 内索引不变），所以这件事该由 loop 保证，而不是指望 4B 模型的指令遵循。
+  - **实测（`test1` 库，原问题「赵慧为作者的论文有哪些，讲了啥」）**：`rounds 1 → 2`、`evidence 0 → 6`、`verdict` 由**假的** SUFFICIENT 变为真实判定。无重复拒绝时跑 3 轮（第 3 轮重复第 1 轮的空调用）；加上之后 2 轮结束。
+  - **仍未修（性质不同）**：**跨语言检索质量**。中文问「赵慧」、语料是英文（署名 `Hui Zhao`），`hybrid_search` 返回的 6 条里混有标题页碎片，草稿因此会把 `Introduction` 当成论文标题。这不是循环结构问题，是查询语言与语料语言不一致时的召回质量问题。
+  - **答案与草稿分离（同日修复）**：`draft` 只供 checker 判且**不流式输出**；循环退出后由 `answer` 写一次并流式输出。原因：每轮草稿是给 checker 的**提案**，可能被否决并要求再来一轮 —— 边写边发到答案区就是"答案改主意"：第一轮工具调用没命中，就把"证据无法回答"推到答案位置，下一轮又换成"有的"。实测事件顺序：三轮 trace 全部走完、`[SCA]` 落定之后答案才开始流出；流出的 **733 字符 == `Result.Draft` 的 733 字符**，即屏幕上那段就是最终答案，不会被撤回。
+  - **实测代价**（`test1` 库，3 轮问答）：Round 2 判定草稿 **37.1s** + Round 3 判定草稿 **38.8s** + 答案 **41.4s** = **164s**。改造前这 3 轮只需 2 份生成（最后一轮草稿**兼**答案，约 76s），现在 3 份，**多一次完整生成（+41.4s，约 +35%）**；1 轮问答则 1 份变 2 份，**接近翻倍**。
+  - 这一份不是重复劳动（草稿写于单轮证据快照、目的是判充分性；答案写于定稿证据池、目的是给人读），但**要把 N 份降到 1 份，正确做法是让 checker 直接判证据而不是判草稿（§6.6 的改动），而不是砍掉写答案这一步**。
 
 ---
 
@@ -633,12 +809,68 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 | 解析层语言 | **Python Sidecar（推荐）** | 复用 PyMuPDF / PP-DocLayout / TSR 成熟实现；Go 全量重写需先 PoC `go-fitz` |
 | 文本提取策略 | **PyMuPDF 文字层优先，OCR 兜底** | 电子版 PDF 免除 GPU OCR，是 8GB 约束下最大优化 |
 | 表格解析 | **TSR 结构 + 文字层归位 + RAGFlow `construct_table`** | 保住行列/表头/跨格，避免按 y/x 排序丢失结构 |
-| 分块策略 | **每个 PP-DocLayout bbox 块 = 一个 chunk（不合并）** | BGE-M3 窗口足够大，块级粒度保留完整语义与结构 |
+| 分块策略 | **TUIrag 策略 B 层级合并 + 适度合并上限**（标题归组 Section、段落缓冲、表/图合并 Caption） | 标题不再作为独立 chunk 挤掉正文；见 §5.3 |
 | Agentic Loop | **对齐 RAGFlow medium**（无 planner/fanout，SCA ≤ 3 轮，session ≤ 8 轮） | 初期最小可用；high/ultra 后续按需 |
-| 路由 / 充分性检查 | **Laya 类型化决策（不生成文本），SCA 只喂 draft（§6.6）** | 省一次大模型推理，~33ms、无幻觉；draft 长度可控，适配 Laya 小窗口 |
+| 每轮工具调用预算 | **`ActionMaxTurns = 12`（每*轮*额度，不是全程总额）**，并让 planner 显式批量下发 | RAGFlow 的工具 agent 同样在一个 step 内发多个 tool call、由 `max_rounds` 收口；这里 `SCAMaxRounds` 对应它的 `max_rounds` |
+| 查询改写的位置 | **检索前改写，第一轮就搜改写后的查询**（`RewriteQueries`，`queries` 即检索目标）；**原始问题不再是检索候选**（`buildCandidates` 只吃 `queries`）；问题本身仍用于 SCA / 答案 / 缺口改写 | RAGFlow 的顺序也是"先改写（formalize：standalone question + keywords）→ 再拆解（fanout）→ 检索"；反过来的代价是每轮都拿一个模型当初就没打算匹配的查询去搜。改写 prompt 的两条硬规则来自实测失败：**禁近似重复**（`X game`/`X matchup`/`X contest` 是一条）、**禁通用检索名词**（`article`/`details`/`summary`）；同义词只针对**实体名**（Apple→Apple Inc./AAPL），不是关系词。失败即回退到原问题（无模型/调用失败/回复无法解析/形状守卫拒绝） |
+| 简单 vs 复杂的拆解边界 | **只有复杂问题拆解**；简单问题不进 decomposer；**两类都要先改写**（复杂路径的每个子问题各自改写） | Laya 路由决定分支（`ragNode` 直接跑 loop，无拆解）；低置信度的路由答复回退启发式（`TestRouterIgnoresACoinFlip`） |
+| metadata_search 的语义 | **它是"文档选择器"，选中的 doc id 存进 `kbinfo` 成为**持久 scope**，后续所有工具的检索都受它约束**；`clear=true` 解除，新的调用替换 | RAGFlow 把 doc_ids 放在 tool 响应里、靠模型自己"花掉"（`MetadataSearchUsed bool` 是一次性守卫）；把 scope 交给模型是小模型容易丢的东西——存进 kbinfo 后无论模型是否再提都生效 |
+| scope 的作用位置 | **下推到检索内部**：`store.Filter` + `SearchIn/SearchVectorIn/HybridIn/GrepIn`，qdrant 走 `SearchScoped`（payload filter 下推，可选接口 `ScopedDenseIndex`） | **事后过滤 top-k 会漏**：范围内有命中但被范围外的高分结果挤出 top-k 时，事后过滤返回空。RAGFlow 同样是先收敛到 doc id 集合、再把它当检索的 `DocScope` 传下去。BM25 统计量刻意保持全库口径（与 ES 在 filter 下的行为一致） |
+| 过滤字段的 payload 索引 | **`EnsureCollection` 里确保 `doc_id` 为 keyword 索引**（每次打开知识库都确保，所以升级前建的库会在首次使用时自动补上） | 不建索引时 qdrant 回答 doc_id 过滤要**全量扫描**，scope 就从"收窄"变成"拖慢"，正好反向。索引构建是**异步**的（实测 1302 点约 3s 内出现 schema）；建索引失败只警告不报错——过滤器没有索引**仍然生效**（只是慢），为性能优化把稠密检索整个拖垮是错的方向 |
+| 批量索引 | **异步作业 + 有界池**：`index_batch` 立即返回 job id，逐篇 `progress` 通知，`index_cancel` 可中断；`indexBudget{Parse:1, Write:4}` | `Serve` 一次只读一条请求，同步批量无法被取消。两个额度方向相反：解析是带宽受限（实测 1/2/4 路 = 6.0/10.5/11.8s 每篇，**并发更慢**），嵌入/upsert 是网络 I/O（可重叠）。解析闸门只包住 parse 调用，embed 才能与下一篇解析重叠 |
+| 图像内容摘要（VLM） | **`qwen2.5vl:3b`**，并发 4，`num_predict=155`（上限），裁剪最长边 768px，**只处理 `Figure` 块**，摘要**追加**在抽取文本之后并剥掉数值 | 见下 |
+| 路由 / 充分性检查 | **Laya-32k 类型化决策（不生成文本），SCA 读 kbinfo 池本身** | 省一次大模型推理、无幻觉。§6.6 的"只喂 draft"随 draft 一起作废：每轮为判定而生成一次文本，实测 60s/次且无人读。见 §7 下方实测 |
+| Laya 的问题类型由**调用方**声明（`DecisionKind`） | **`noul`：SCA；`choice`：路由 + 工具选择**。type 是 `DecideFunc` 的显式参数，不再由共享闭包固定 | 实测事故：kernel 闭包把 qtype 写死 `"noul"`（只为 SCA 辩护），而**同一个闭包**同时服务路由与工具选择 → 工具选择的选项集成了 `{false,true}`，**每一轮都失败**并静默退回自由形式 planner（正是那个会编造 `doc_id` 的路径）；路由的答复永远匹配不上 `complex`/`simple`，于是每次路由其实都由启发式决定。**两处 Laya 用途等于从未生效**。且 `noul` 与 `choice` 是不同**形状**（布尔对 vs `<label>: <text>`），不只是标签不同——详见 `agent.DecisionKind` |
+| 工具选择的两条护栏 | **① 空池时拒绝 `stop`**（"证据已足够"在空池上是自相矛盾，实测两个子问题都在第一轮选了 stop → 0 篇收场）；**② 计划全是重复调用时改用确定性计划**（重复守卫只能拦住调用、拦不住整轮空转）。且 chooser 的失败**必须进 trace**，不能只进 log | 前者改为报"无法决定"，循环据此去做一次检索（错误是"无法决定"的既定语义，见 `ToolChooser` 注释）。后者实测：某子问题的三轮都在重发同一个被拦下的元数据过滤 |
+| 复杂路径的 SCA 归属 | **每个子问题各自的 kbinfo、各自每轮判一次**；全部 sufficient 后**才**合并，合并走 `kbinfo.add`（同文档同文本折叠、跨文档保留）；**不存在对合并池的全局 SCA** | 对并集的一次 INSUFFICIENT 说不出*哪个*子问题证据薄，循环因此无从改写；且"整个复合问题够不够"不是该 checkpoint 训练过的判定。合并池只交给生成器读 |
+| 枚举类问题 | **移植 RAGFlow 的 slot 表策略**：声明驱动判定门（`Coverage.Ok()`）→ 每个 operand 一次召回 → 成员抽取并**锚定到 passage** → 轮数收敛到 2；成员清单渲染进答案 prompt | 见下方"枚举类问题（移植 RAGFlow）"一节 |
+
+### 枚举类问题（移植 RAGFlow）
+
+来源：RAGFlow `internal/rag/agentic-rag/runtime/coverage.go`（判定门）+ `coverage_enumerate.go`（召回与切窗）+ `graph_slots.go`（填充与渲染）。freerag 侧实现：`internal/agent/coverage.go`（纯逻辑）、`enumerate.go`（成员抽取）、`queries.go` 的 `PlanQueries`（声明）、`loop.go` 的 `enterEnumeration`。
+
+**为什么是"声明驱动"而不是"检测问题措辞"**：判定门只读**规划器自己的声明**（槽位 type/subject/terms），从不读问题的字面。二者差别不是风格问题：按措辞匹配的判定门，碰到"看起来像清单、答案却只有一个值"的问题会付全部代价，而且它的失败是**静默的**（照常花预算、照常作答）。声明不成立的表**一分钱不花**——这条有反向测试锁死（连抽取调用都不发生）。
+
+**四步与 RAGFlow 的对应**：
+
+| 步骤 | RAGFlow | freerag | 保住了什么 |
+| :--- | :--- | :--- | :--- |
+| 声明 | `InitializeState` 返回 `slots` + `first_queries`（**一次调用**） | `PlanQueries` 在改写调用里同时返回 `slots` + `queries` | 零额外生成调用；同为"读一次问题、答两件事" |
+| 判定门 | `Coverage.Ok()` = `Set && ItemKind != "" && len(Acts) > 0` | 逐字移植（`coverage.go`） | 把"元素集合"与"事件计数"分开——后者的 act 词不改变结论 |
+| 召回 | `Operands()` 每个 operand **一次** grep（TopN=1000），**绕过 query_rewrite** | `Operands()` 每个 operand 作为第 1 轮查询；第 2 轮才是常规改写 | "每个 operand 一次"这条（按 (actor, act) 配对会反复召回同一个词，常见词先吃满配额） |
+| 收敛 | `CoverageOf(...).Ok() && rounds > 2 → 2` | `enumMaxRounds = 2`（`enterEnumeration`） | 集合一旦在被枚举，多跑轮次只是重问同一份清单 |
+| 成员 | 每窗一次模型裁定（`RunCoverageResolve`，批 8，上限 288 窗），锚点由行号所在窗给出 | **对池的一次批量抽取**，锚点**回池校验** | 要害是"没有出处的成员不算数"（`AnchoredMembers`）：名单被读成一组名字，没有标记能指出哪个是编的 |
+
+**刻意未移植**（以及理由）：
+
+- **深度 3 的槽树与逐轮缺口提升**（`maxSlotDepth`、`MergeSlotPatch`）：RAGFlow 用多轮把缺口长成新槽、再合并分支；freerag 一个子问题只有 2 轮且无分支，故槽表**扁平且在声明时固定**。
+- **每窗裁定**：RAGFlow 的模型跑在 GPU 上；本机生成 6.4 tok/s，逐窗问一次会让一个子问题花掉数分钟。改问一次，但**锚定规则不放松**——声明了错的行号仍会被回池按名字校验（`anchorMember`，对应 RAGFlow 的 `resolveMemberAnchor`）。
+- **count 槽同步 / Jaccard 批量填充**：那些是为"多个并行会话写同一张表"而存在的对账，这里只有一个写者。
+
+**与其他改动的关系**：枚举的召回列表更窄更具体（操作数是声明出来的），且判定读的仍是**单个子问题的池**——所以它与 `MaxStateChars = 10000`、与"每个子问题各自 kbinfo"是互相加强的。成员抽取是**每个子问题至多一次**的额外生成调用，仅在判定门通过时发生。
 | 模型推理 | 外部独立进程（llama.cpp / Ollama） | 故障隔离，避免把推理编进 Go 二进制 |
 | GPU 管理 | **动态模型切换**（加载/卸载） | 模型常驻总和易超 8GB，必须按序加载卸载 |
 | 上下文长度 | 限制 **4K–8K tokens**（默认取 8192） | 8GB 显存下超 4096 tokens 即可能 OOM |
+
+> **Laya 实测（2026-10-01，两代 checkpoint 对比）**：在部署包自带的 `laya-32k/data/test.jsonl`（2465 条 `noul`，
+> 1115 正 / 1350 负，多数类基线 54.8%）上：
+>
+> | state 长度 | 旧 512（`laya-onnx.old-512`） | **laya-32k** |
+> | :--- | :--- | :--- |
+> | ~370 tok（1.6k 字符） | 75.0%（正例 62.5%） | **93.8%（正例 100%）** |
+> | ~8k tok（33k 字符） | **50.0%（正例 16.7%）** | 100%（n=4，未观察到失败） |
+>
+> 位置消融（官方 `position_fractions [0.03,0.3,0.6,0.97]`，用官方 `relocate_state`）：**`decay_pp = 0.0pp`**（门槛 ≤8pp）。
+> 旧模型在长文本上退化成"一律说不足"，正因如此它会在长文档上把"证据够了"判成"不够"，让循环空转。
+> **成本**：32k 建会话 6.0s（每进程一次）；236 tok 2.0s、875 tok 8.9s、3811 tok 65s、8k tok ≈ 59s；
+> 而旧 512 恒定 7–10s（它截断）。交叉点约 **800–1000 token**。官方 `bench_length` 的 4000–32000 档在本机 CPU 上跑不动
+> （config 原注："CPU 单线程测 32000 要 30+ 分钟"）→ 长上下文的 `decay_pp` 与 Needle@32k **未验证**。
+> 因此 **`DefaultMaxStateChars = 10000`**（≈2.3k token）——**按算力定，不按窗口定**：
+> 32k 的窗口能装约 10 万字符，但耗时是 236 tok 2.0s、875 tok 8.9s、**2k tok 中位 14.6s**，
+> 再往上就不可预测（3811 tok 65s、8k tok 11–76s 巨幅波动、10.7k tok 9 分钟未完成）；
+> 而准确率在整个区间**没有提升**（370 tok 93.8%、2k tok 91.7%、8k tok 4/4，正例全程 100%）。
+> 所以填满这个预算的判定约 15s，典型池子远小于它。有加速器的机器可 per-checker 上调
+> （`LayaChecker.MaxStateChars`）。复跑脚本：`scripts/eval_laya.py`、`scripts/ablate_laya_position.py`、`scripts/compare_laya.py`。
 
 > **实测修正（2026-09-29）**：Ollama 的默认窗口是 **4096**，而 Agentic 循环第 2 轮的证据块实测会到 **7647 tokens**，
 > 服务端直接返回 **HTTP 400**（不是截断），循环静默降级成抽取式 draft。因此：
@@ -741,10 +973,10 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 - [x] 集成 **PP-DocLayout ONNX**（`layout.onnx`）做版面分析：已实现并实测（`sidecar/layout_onnx.py`，加速器优先）；可视化见 `scripts/visualize_layout.py`。
 - [x] 实现 **PyMuPDF 文字层优先**的按块内容提取（Title/Text/Equation），OCR 仅兜底。→ `layout.py::text_in_bbox`；表格走 `find_tables()` 转 Markdown。
 - [x] 实现**解析流水线**（§5.1 的 ①→⑥）。→ `sidecar/pipeline.py`，38 页真实论文验收。
-- [x] 实现**分块**：每个 PP-DocLayout bbox 块直接作为一个 chunk（策略 A，不合并）。→ `sidecar/chunking.py`。
+- [x] 实现**分块**：每个 PP-DocLayout bbox 块直接作为一个 chunk（策略 A，不合并）。→ `sidecar/chunking.py`；**后改为 TUIrag 策略 B 层级合并（2026-09-30，见 §5.3）**。
 - [x] 实现**超短块合并/挂靠**（§5.3.1）与噪音页眉页脚过滤、超 BGE-M3 窗口的按句拆分。→ 已实现；`Caption`/`Reference` 已加入豁免类型。
 - [ ] **表格解析**：集成 TSR（`tsr.onnx`）+ 移植 RAGFlow `construct_table`（行列排序、孤立行列剔除、表头判定、colspan/rowspan、HTML/描述文本双输出）。→ **已完成（2026-09-29）**：`sidecar/tsr_onnx.py` + `sidecar/table_grid.py`；表格转 Markdown **1/10 → 9/10**。注：输出目前只走 Markdown 一份，HTML/描述文本未做。
-- [~] 实现**双栏处理**与 **layout/chunk 缓存**。→ **缓存已完成**（`sidecar/cache.py`，实测 21.5s → 0.18s）；**双栏仍未显式处理**，见 §0.1 P1-4。
+- [x] 实现**双栏处理**与 **layout/chunk 缓存**。→ 缓存已完成（`sidecar/cache.py`，实测 21.5s → 0.18s）；**双栏已完成（2026-09-30）**：`postprocess` 改 XY-cut 阅读顺序后，块序即列序，见 §5.3.2。
 - [ ] 集成 GLM-OCR（GPU，动态加载）作为扫描件兜底；评估 INT4 量化版。→ 见 §0.1 P1-3；**扫描件目前完全不可用**。
 - [ ] 实现模型**动态加载/卸载**调度。
 

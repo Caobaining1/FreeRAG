@@ -3,6 +3,7 @@ package dense
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,9 +101,78 @@ func TestEnsureCollectionAcceptsAMatchingWidth(t *testing.T) {
 		t.Fatalf("EnsureCollection: %v", err)
 	}
 	for _, call := range *calls {
-		if call.method == http.MethodPut {
-			t.Fatalf("a matching collection must not be recreated: %#v", call)
+		// The assertion is about the COLLECTION, so it looks at writes to it.
+		// A PUT to /index is expected even here — ensuring the doc_id index is
+		// how a knowledge base created before it existed gets one — and reading
+		// the whole calls list as "was the collection recreated" said the
+		// opposite of what this test means.
+		if call.method != http.MethodPut || strings.Contains(call.path, "/index") {
+			continue
 		}
+		t.Fatalf("a matching collection must not be recreated: %#v", call)
+	}
+}
+
+// A knowledge base indexed before the payload index existed has none, so
+// ensuring it must happen for a collection that is already there — otherwise
+// every scoped search on it scans the whole collection forever.
+func TestEnsureCollectionIndexesDocIDOnAnExistingCollection(t *testing.T) {
+	body := `{"result":{"config":{"params":{"vectors":{"size":1024,"distance":"Cosine"}}}}}`
+	server, calls := fakeQdrant(t, body, http.StatusOK)
+
+	if err := client(server, 1024).EnsureCollection(); err != nil {
+		t.Fatalf("EnsureCollection: %v", err)
+	}
+
+	var sent map[string]any
+	for _, call := range *calls {
+		if call.method == http.MethodPut && strings.HasSuffix(call.path, "/index") {
+			sent = call.body
+		}
+	}
+	if sent == nil {
+		t.Fatalf("no payload index was created; calls = %#v", *calls)
+	}
+	if sent["field_name"] != "doc_id" {
+		t.Fatalf("indexed %#v, want the field scoped searches filter on", sent["field_name"])
+	}
+	// keyword, because a scope matches whole document ids: a full-text index
+	// would tokenise them and match pieces of a name.
+	if sent["field_schema"] != "keyword" {
+		t.Fatalf("field_schema = %#v, want keyword", sent["field_schema"])
+	}
+}
+
+// Creating the index is an optimisation, so failing to create it must not take
+// dense retrieval down with it: the filter still works, it just scans.
+func TestAFailedPayloadIndexIsAWarningNotAnError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/index") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"status":{"error":"unknown field_schema"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"result":{"config":{"params":{"vectors":{"size":1024,"distance":"Cosine"}}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"result":{"status":"completed"}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	var logged strings.Builder
+	qdrant := client(server, 1024)
+	qdrant.Logger = log.New(&logged, "", 0)
+
+	if err := qdrant.EnsureCollection(); err != nil {
+		t.Fatalf("a failed payload index must not fail the collection: %v", err)
+	}
+	if !strings.Contains(logged.String(), "doc_id") {
+		t.Fatalf("the warning does not name the field or the cost: %q", logged.String())
+	}
+	if !strings.Contains(logged.String(), "scan") {
+		t.Fatalf("the warning does not say what it costs: %q", logged.String())
 	}
 }
 
@@ -192,6 +262,65 @@ func TestSearchMapsPayloadsToMatches(t *testing.T) {
 	}
 	if matches[0].DocID != "a.pdf" || matches[0].ChunkID != "c0" || matches[0].Score != 0.93 {
 		t.Fatalf("matches[0] = %#v", matches[0])
+	}
+}
+
+// The scope has to reach the vector database, not be applied to what comes back.
+// A search that returns a global top-k which the caller then sifts can come back
+// empty while in-scope passages exist (see store.Filter), so the filter belongs
+// in the request.
+func TestSearchScopedSendsTheScopeAsAPayloadFilter(t *testing.T) {
+	server, calls := fakeQdrant(t, "", http.StatusOK)
+
+	if _, err := client(server, 3).SearchScoped([]float32{1, 0, 0}, 10, []string{"b.pdf", "a.pdf"}); err != nil {
+		t.Fatalf("SearchScoped: %v", err)
+	}
+
+	var sent map[string]any
+	for _, call := range *calls {
+		if call.method == http.MethodPost && strings.Contains(call.path, "/points/search") {
+			sent = call.body
+		}
+	}
+	if sent == nil {
+		t.Fatalf("no search request was issued; calls = %#v", *calls)
+	}
+
+	filter, _ := sent["filter"].(map[string]any)
+	must, _ := filter["must"].([]any)
+	if len(must) != 1 {
+		t.Fatalf("filter = %#v, want exactly one clause — one clause covers a scope of any size", filter)
+	}
+	clause, _ := must[0].(map[string]any)
+	if clause["key"] != "doc_id" {
+		t.Fatalf("clause key = %#v, want the doc_id field Upsert writes", clause["key"])
+	}
+	match, _ := clause["match"].(map[string]any)
+	any, _ := match["any"].([]any)
+	if len(any) != 2 || any[0] != "b.pdf" || any[1] != "a.pdf" {
+		t.Fatalf("match = %#v, want both scoped documents", match)
+	}
+}
+
+func TestSearchSendsNoFilterWhenUnscoped(t *testing.T) {
+	server, calls := fakeQdrant(t, "", http.StatusOK)
+
+	if _, err := client(server, 3).Search([]float32{1, 0, 0}, 10); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	// An empty scope must not become a filter that matches nothing.
+	if _, err := client(server, 3).SearchScoped([]float32{1, 0, 0}, 10, nil); err != nil {
+		t.Fatalf("SearchScoped(nil): %v", err)
+	}
+
+	for _, call := range *calls {
+		if !strings.Contains(call.path, "/points/search") {
+			continue
+		}
+		if _, present := call.body["filter"]; present {
+			t.Fatalf("an unscoped search sent filter = %#v; an absent scope must not narrow anything",
+				call.body["filter"])
+		}
 	}
 }
 

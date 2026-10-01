@@ -1,9 +1,9 @@
 // Package agent implements the medium-mode Agentic Loop described in
 // docs/plan.md §6: the graph
 //
-//	formalize_question -> rag_agent(session -> draft -> sca) <-> query_rewrite
+//	formalize_question -> rag_agent(session -> answer -> sca) <-> query_rewrite
 //
-// where retrieval is local, the draft and the rewritten queries come from the
+// where retrieval is local, the answer and the rewritten queries come from the
 // generating model, and the sufficiency verdict comes from a decision model
 // (Laya) or its deterministic fallback.
 package agent
@@ -52,4 +52,17 @@ type ToolSpec struct {
 // graph's control flow must be verifiable without a model download.
 type Model interface {
 	Complete(ctx context.Context, messages []Message, tools []ToolSpec) (*Reply, error)
+}
+
+// StreamingModel is a Model that can report its reply as it is generated.
+//
+// Deliberately separate from Model rather than folded into it: streaming is a
+// convenience for the UI, and requiring every implementation to carry it would
+// make every test double do so too, for a capability the loop only uses when it
+// happens to be there. The loop type-asserts (loop.go, answer).
+type StreamingModel interface {
+	Model
+	// CompleteStream returns the same Reply Complete would, having passed each
+	// piece of answer text to onDelta in order. onDelta may be nil.
+	CompleteStream(ctx context.Context, messages []Message, tools []ToolSpec, onDelta func(string)) (*Reply, error)
 }

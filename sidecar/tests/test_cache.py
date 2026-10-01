@@ -38,6 +38,9 @@ class CacheKeyTest(unittest.TestCase):
             {"max_chars": 500},
             {"max_pages": 5},
             {"layout": "pymupdf"},
+            # Two vision models write different text into a Figure chunk, so a
+            # hit across them would return chunks no model produced.
+            {"vlm": "qwen3-vl:4b"},
         ):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.key(**overrides), baseline)
