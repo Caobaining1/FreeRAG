@@ -109,8 +109,17 @@ KNobs: Dict[str, Dict[str, object]] = {
     # internal/agent/loop_test.go pins Medium().SnippetsPerQuery at 6 — a sweep of
     # this knob must update that expectation too, which the build step will not
     # catch on its own.
-    "SnippetsPerQuery": {"file": "internal/agent/loop.go", "current": 6,
-                         "pattern": r"SnippetsPerQuery:\s*(\d+)", "candidates": [10]},
+    "SnippetsPerQuery": {
+        "file": "internal/agent/loop.go", "current": 6,
+        "pattern": r"SnippetsPerQuery:\s*(\d+)", "candidates": [10],
+        # TestMediumSpecMatchesPlan pins the shipped spec, and its job is to catch
+        # accidental drift — not to forbid a measured change, which is what this loop
+        # produces. So the sweep updates the pin with the value, leaving the test still
+        # guarding every OTHER field and every unattempted edit.
+        "also_update": [{"file": "internal/agent/loop_test.go",
+                         "pattern": r"(spec\.SnippetsPerQuery != )(\d+)",
+                         "replacement": r"\g<1>{value}"}],
+    },
 }
 
 
@@ -158,6 +167,26 @@ def accepts(candidate: Dict, baseline: Dict, noise: float) -> Tuple[bool, str]:
     return True, f"提升 {after - before:+.3f} ≥ 噪声带 {noise:.3f}，守卫无回归{guard}"
 
 
+# Every file this script has rewritten, with its original text, so a revert is exact.
+# The main edit is not always the only file: a knob pinned by a regression test has to
+# update the pin in the same change (see also_update), and reverting only the knob
+# would leave a test asserting the REJECTED value — i.e. a rejected change that leaves
+# the tree red.
+_TOUCHED: List[Tuple[Path, str]] = []
+
+
+def _write(path: Path, text: str) -> None:
+    _TOUCHED.append((path, path.read_text(encoding="utf-8")))
+    path.write_text(text, encoding="utf-8")
+
+
+def restore() -> None:
+    """Put every rewritten file back, newest first."""
+    while _TOUCHED:
+        path, original = _TOUCHED.pop()
+        path.write_text(original, encoding="utf-8")
+
+
 def apply_knob(name: str, value: int) -> Tuple[Path, str, str]:
     """Rewrite one knob, returning (file, original_text, patched_text)."""
     spec = KNobs[name]
@@ -170,7 +199,18 @@ def apply_knob(name: str, value: int) -> Tuple[Path, str, str]:
     patched = re.sub(pattern, lambda m: m.group(0).replace(m.group(1), str(value)), original, count=1)
     if patched == original:
         raise SystemExit(f"refusing to continue: {name} was not changed")
-    path.write_text(patched, encoding="utf-8")
+    _write(path, patched)
+    for extra in spec.get("also_update") or []:
+        extra_path = REPO / str(extra["file"])
+        text = extra_path.read_text(encoding="utf-8")
+        found = re.findall(str(extra["pattern"]), text)
+        want = int(extra.get("expect", 1))
+        if len(found) != want:
+            raise SystemExit(
+                f"refusing to edit {extra['file']}: its pin matched {len(found)} time(s), want {want}. "
+                f"A swept knob that stops updating its pin leaves a failing test behind.")
+        _write(extra_path, re.sub(str(extra["pattern"]),
+                                  str(extra["replacement"]).replace("{value}", str(value)), text, count=want))
     return path, original, patched
 
 
@@ -231,12 +271,12 @@ def run_one(name: str, value: int, baseline: Dict, noise: float) -> bool:
                         BASELINE_SCORECARD)
             print(f"ACCEPTED {name}={value}: {reason}")
             return True
-        path.write_text(original, encoding="utf-8")   # revert
+        restore()   # revert, including any test pin that was updated with it
         rebuild()
         print(f"rejected {name}={value}: {reason}")
         return False
     except BaseException:
-        path.write_text(original, encoding="utf-8")
+        restore()
         rebuild()
         raise
 
