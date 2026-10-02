@@ -74,7 +74,7 @@ KNobs: Dict[str, Dict[str, object]] = {
     "maxSearchQueries": {
         "file": "internal/agent/queries.go",
         "pattern": r"(?m)^const maxSearchQueries = (\d+)$",
-        "current": 3, "candidates": [2, 4],
+        "current": 3, "candidates": [2, 4, 5],
         "why": "queries per rewrite: fewer means a narrower first recall, more means "
                "another retrieval call per round",
     },
@@ -88,20 +88,20 @@ KNobs: Dict[str, Dict[str, object]] = {
     "DefaultMaxStateChars": {
         "file": "internal/agent/checker.go",
         "pattern": r"(?m)^const DefaultMaxStateChars = (\d+)$",
-        "current": 10000, "candidates": [6000, 14000],
+        "current": 10000, "candidates": [4000, 6000, 14000, 20000],
         "why": "evidence the checker reads: less is cheaper and may drop a passage it "
                "needed, more costs seconds per decision",
     },
     "SCAMaxRounds": {
         "file": "internal/agent/loop.go",
         "pattern": r"(?m)^\t\tSCAMaxRounds: (\d+),$",
-        "current": 3, "candidates": [2],
+        "current": 3, "candidates": [2, 4],
         "why": "rounds per simple question: the whole cost curve is linear in this",
     },
     "ActionMaxTurns": {
         "file": "internal/agent/loop.go",
         "pattern": r"(?m)^\t\tActionMaxTurns:   (\d+),$",
-        "current": 12, "candidates": [8],
+        "current": 12, "candidates": [8, 16],
         "why": "calls per turn: fewer means the planner must choose, more means it can "
                "dump several searches into one round",
     },
@@ -111,7 +111,7 @@ KNobs: Dict[str, Dict[str, object]] = {
     # catch on its own.
     "SnippetsPerQuery": {
         "file": "internal/agent/loop.go", "current": 6,
-        "pattern": r"SnippetsPerQuery:\s*(\d+)", "candidates": [10],
+        "pattern": r"SnippetsPerQuery:\s*(\d+)", "candidates": [4, 8],
         # TestMediumSpecMatchesPlan pins the shipped spec, and its job is to catch
         # accidental drift — not to forbid a measured change, which is what this loop
         # produces. So the sweep updates the pin with the value, leaving the test still
