@@ -40,3 +40,5 @@
 > 在 9 题 dev-loop 上，只有 **≥0.10~0.15** 的变化才可能被分辨。已据此改脚本（禁止扫死旋钮）
 > 与会改噪声带估计（`docs/plan.md` §13.17）。
 | 2026-10-02 | `SnippetsPerQuery` | → 10 | 0.3691 | 0.4293 | 49 min | **接受** | 提升 +0.060 ≥ 噪声带 0.050，守卫无回归（拒答守卫未测：只有 1 道 null 题） |
+| 2026-10-02 | `decomposeSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases do not contain the expected source articles (e.g., 'The Age', 'Fortune', 'Th |
+| 2026-10-02 | `rewriteSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases are mostly irrelevant to the questions (e.g., sports, antitrust, unrelated n |

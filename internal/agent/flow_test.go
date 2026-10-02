@@ -122,6 +122,38 @@ func TestBuildCandidatesOffersDocumentsFromThePool(t *testing.T) {
 	}
 }
 
+// A probe for a word that matches the whole corpus is not a probe.
+//
+// The checker reports the terms an answer is missing, and on the MultiHop-RAG dev split
+// it reported "the" — which became grep("the"). Six unrelated questions were then
+// answered from pools whose first passage was the same sports article, the query the
+// rewriter had produced was never searched at all, and those questions scored 0.11-0.23
+// with 100% of their evidence sitting in the index (docs/plan.md §13.19).
+func TestBuildCandidatesRefusesUndiscriminatingGreps(t *testing.T) {
+	missing := []string{"the", "of", "it", "AI", "information", "Anthropic"}
+	candidates := buildCandidates([]string{"a real query"}, missing, nil, nil)
+
+	var patterns []string
+	for _, candidate := range candidates {
+		if candidate.Call.Name == ToolGrepSearch {
+			patterns = append(patterns, candidate.Call.Arguments["pattern"].(string))
+		}
+	}
+	if len(patterns) != 1 || patterns[0] != "Anthropic" {
+		t.Fatalf("grep patterns = %#v, want only the discriminating term", patterns)
+	}
+}
+
+// The search candidates are untouched by the filter: a run whose only missing terms are
+// function words still has its queries to fall back on.
+func TestBuildCandidatesKeepsSearchesWhenEveryTermIsRefused(t *testing.T) {
+	candidates := buildCandidates([]string{"the query the rewriter produced"}, []string{"the", "and"}, nil, nil)
+
+	if len(candidates) != 1 || candidates[0].Call.Name != ToolHybridSearch {
+		t.Fatalf("candidates = %#v, want exactly the one search", candidates)
+	}
+}
+
 // ---- Laya tool choice ----
 
 func TestLayaToolChooserPicksACandidate(t *testing.T) {
