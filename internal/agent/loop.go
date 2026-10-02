@@ -46,7 +46,7 @@ func Medium() Spec {
 		// single turn pull in so much evidence that the answer prompt stops
 		// fitting; the ceiling that matters is still SCAMaxRounds × this.
 		ActionMaxTurns:   12,
-		SnippetsPerQuery: 10,
+		SnippetsPerQuery: 6,
 		// The four retrieval tools of §6.7: nothing that needs a compiled
 		// structure (no navigate_*, no graph_explore) and no web search.
 		Tools: ToolNames(),
