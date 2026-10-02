@@ -315,7 +315,7 @@ func (t *Toolbox) run(ctx context.Context, call ToolCall) (ToolResult, error) {
 	}
 }
 
-const defaultToolLimit = 10
+const defaultToolLimit = 6
 
 func (t *Toolbox) limit(call ToolCall, key string) int {
 	if value, ok := intArg(call.Arguments, key); ok && value > 0 {

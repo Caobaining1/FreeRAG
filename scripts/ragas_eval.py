@@ -75,6 +75,14 @@ class Kernel:
         # whole layout (registry included).
         env["FREERAG_DATA"] = str(data_dir / "index.json")
         data_dir.mkdir(parents=True, exist_ok=True)
+        # Greedy sampling for every measurement. The generator ships at 0.2
+        # (cmd/freerag/main.go) because answers read better with a little variation —
+        # and that variation is wider than anything the loop has proposed: three
+        # dev-loop runs of the SAME effective code scored 0.3672, 0.3735 and 0.4465,
+        # a range of 0.079, and the loop accepted a +0.079 change that was inert.
+        # Comparisons cannot resolve a change through that spread. setdefault, so an
+        # explicit outer value still wins when a run must reproduce shipped behaviour.
+        env.setdefault("FREERAG_GENERATION_TEMPERATURE", "0")
         self._next_id = 0
         self.proc = subprocess.Popen(
             [str(KERNEL)],

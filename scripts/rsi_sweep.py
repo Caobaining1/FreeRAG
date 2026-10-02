@@ -45,6 +45,19 @@ LEDGER = REPO / "docs" / "rsi-ledger.md"
 # questions. See scripts/rsi_baseline.py.
 BASELINE_SCORECARD = REPO / "eval" / "runs" / "devloop-baseline.scorecard.json"
 
+# Knobs that look editable and are not. `defaultToolLimit` was swept, "improved"
+# quality_macro by 0.079 and was ACCEPTED before anyone checked that it is the last
+# fallback in Toolbox.limit(): every production Toolbox sets DefaultLimit (from
+# Spec.SnippetsPerQuery, loop.go:754 and cmd/freerag/kb.go:132), so `return
+# defaultToolLimit` is unreachable and the change was inert — the 0.079 was run-to-run
+# noise, and accepting it taught the loop to prefer noise. A knob must be shown live
+# before it is swept, and this table is where that is recorded.
+INERT_KNOBS = {
+    "defaultToolLimit":
+        "shadowed by Toolbox.DefaultLimit, which every production construction sets "
+        "from Spec.SnippetsPerQuery (loop.go:754, cmd/freerag/kb.go:132)",
+}
+
 # A refusal rate over fewer null questions than this is not comparable (dev-loop
 # carries one, so its rate is 0.0 or 1.0). Below it the guard is reported as
 # unmeasured rather than enforced.
@@ -92,12 +105,12 @@ KNobs: Dict[str, Dict[str, object]] = {
         "why": "calls per turn: fewer means the planner must choose, more means it can "
                "dump several searches into one round",
     },
-    "defaultToolLimit": {
-        "file": "internal/agent/tools.go",
-        "pattern": r"(?m)^const defaultToolLimit = (\d+)$",
-        "current": 6, "candidates": [10],
-        "why": "passages per tool call: more per call, fewer calls",
-    },
+    # The value that actually reaches Toolbox.DefaultLimit (loop.go:754). Note that
+    # internal/agent/loop_test.go pins Medium().SnippetsPerQuery at 6 — a sweep of
+    # this knob must update that expectation too, which the build step will not
+    # catch on its own.
+    "SnippetsPerQuery": {"file": "internal/agent/loop.go", "current": 6,
+                         "pattern": r"SnippetsPerQuery:\s*(\d+)", "candidates": [10]},
 }
 
 
@@ -258,6 +271,11 @@ def main() -> int:
         print(f"no baseline at {BASELINE_SCORECARD.relative_to(REPO)} — Phase B must finish first")
         return 1
     print(f"baseline quality_macro = {fitness(baseline)}, refusal = {baseline.get('refusal_rate_on_null')}")
+
+    if args.knob and args.knob in INERT_KNOBS:
+        print(f"refusing: {args.knob} is not a knob")
+        print(f"  {INERT_KNOBS[args.knob]}")
+        return 1
 
     if args.knob:
         if args.knob not in KNobs:

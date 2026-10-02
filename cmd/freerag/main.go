@@ -359,6 +359,28 @@ func syncDenseIndex(s *store.Store, index store.DenseIndex) error {
 // model returned empty content and 160 characters of thinking. Reasoning is
 // worth having when the answer needs it and the budget accounts for it; here
 // the loop asks for two to four cited sentences, which does not.
+// generationTemperature is the sampler temperature for answers.
+//
+// 0.2 by default, not 0: answers read better with a little variation, and this is a
+// product, not a benchmark.
+//
+// But a MEASUREMENT cannot afford it, and this number is the reason the
+// self-improvement loop's first two decisions were meaningless. Three dev-loop runs
+// of the same effective code scored quality_macro 0.3672, 0.3735 and 0.4465 — a
+// range of 0.079 — and the loop accepted a change worth +0.079 that turned out to be
+// inert (docs/rsi-ledger.md). The spread is this sampler, and it is wider than every
+// change the loop has proposed. Evaluation runs set FREERAG_GENERATION_TEMPERATURE=0
+// (scripts/ragas_eval.py does it for every kernel it starts); 0 is also the value
+// OllamaModel already uses for the tool-plan path.
+func generationTemperature() float64 {
+	if raw := strings.TrimSpace(os.Getenv("FREERAG_GENERATION_TEMPERATURE")); raw != "" {
+		if value, err := strconv.ParseFloat(raw, 64); err == nil && value >= 0 {
+			return value
+		}
+	}
+	return 0.2
+}
+
 func thinkingEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("FREERAG_THINK"))) {
 	case "1", "true", "yes", "on":
@@ -435,7 +457,7 @@ func newGenerator() *agent.OllamaModel {
 		// and the reserve in PromptCharBudget has to accommodate whatever is set
 		// here.
 		NumPredict:  1024,
-		Temperature: 0.2,
+		Temperature: generationTemperature(),
 		Think:       &think,
 		KeepAlive:   generatorKeepAlive(),
 	}
