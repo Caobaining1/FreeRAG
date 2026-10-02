@@ -90,6 +90,9 @@ Rules:
 - Keep every existing rule that is not contradicted by the failures. Rules exist because of specific
   observed failures; deleting one to fix another usually trades one failure for the old one.
 - Do not add facts about the corpus, do not name specific answers, and do not mention the evaluation.
+- Use the retrieved passages to tell WHICH problem this is. If they do not contain the expected
+  material, no prompt can fix that and you must set "no_edit": true. If they DO contain it and the
+  answer missed it, that is a prompt problem and you should propose the edit.
 - The prompt is a raw Go string literal: no backticks, no unescaped double quotes inside it.
 - If the failures do NOT look like something this prompt can fix (they may be retrieval, parsing or
   scoring problems), say so instead of guessing: set "no_edit" to true and explain.
@@ -133,7 +136,15 @@ def worst_cases(limit: int) -> List[Dict]:
     pairs.sort(key=lambda p: p[2])
     return [{"question": r["question"], "expected": r["ground_truth"],
              "answer": (r["answer"] or "")[:900], "score": round(m, 3),
-             "scores": {k: s.get(k) for k in metrics}}
+             "scores": {k: s.get(k) for k in metrics},
+             # What retrieval actually returned, and how much of it. Without this the
+             # proposer sees a low score and has to GUESS whether the queries went
+             # the wrong way or the corpus had nothing to give — and its two answers
+             # (propose an edit / decline) are only useful if it can tell them apart.
+             # Observed: on a prompt whose failures were retrieval-side it declined
+             # with "not due to this prompt", a conclusion it could not check.
+             "n_contexts": len(r.get("contexts") or []),
+             "context_sample": [c[:300] for c in (r.get("contexts") or [])[:3]]}
             for r, s, m in pairs[:limit]]
 
 
@@ -151,7 +162,9 @@ def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base:
         f"[{i + 1}] question: {c['question'][:220]}\n"
         f"    expected: {str(c['expected'])[:120]}\n"
         f"    system answer: {c['answer'][:400]}\n"
-        f"    per-metric: {c['scores']}"
+        f"    per-metric: {c['scores']}\n"
+        f"    retrieved {c.get('n_contexts', 0)} passage(s); the first ones were:\n"
+        + "\n".join(f"      - {ctx[:220]}" for ctx in c.get("context_sample", []))
         for i, c in enumerate(cases))
     body = {
         "model": model,

@@ -15,3 +15,5 @@
 > 这次事故值得记下：**错误基线之所以没被发现，是因为两种算法给出的判决恰好相同**
 > （−0.069 与 +0.037 都低于阈值）。若候选的提升落在 0.037~0.069 之间，它就会被误判——
 > 而"判决正确"这个结果本身不会暴露它。
+| 2026-10-02 | `rewriteSystemPrompt` | — | — | — | — | 无提案 | The failures are due to retrieval returning irrelevant documents and the downstream answer generator failing to synthesi |
+| 2026-10-02 | `defaultToolLimit` | → 10 | 0.3672 | 0.4465 | 55 min | **接受** | 提升 +0.079 ≥ 噪声带 0.050，守卫无回归（拒答守卫未测：只有 1 道 null 题） |
