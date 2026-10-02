@@ -40,7 +40,15 @@ from typing import Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parent.parent
 LEDGER = REPO / "docs" / "rsi-ledger.md"
-BASELINE_SCORECARD = REPO / "eval" / "runs" / "baseline.scorecard.json"
+# The dev-loop reduction, not the full-dev scorecard: a candidate is measured on
+# dev-loop (10 questions, ~28 min), so the comparison point must be the same
+# questions. See scripts/rsi_baseline.py.
+BASELINE_SCORECARD = REPO / "eval" / "runs" / "devloop-baseline.scorecard.json"
+
+# A refusal rate over fewer null questions than this is not comparable (dev-loop
+# carries one, so its rate is 0.0 or 1.0). Below it the guard is reported as
+# unmeasured rather than enforced.
+MIN_NULL_FOR_GUARD = 4
 GO = REPO / ".toolchain" / "go" / "bin" / "go"
 PY = REPO / ".venv314" / "bin" / "python"
 RAGAS_PY = REPO / ".venv-ragas" / "bin" / "python"
@@ -126,12 +134,15 @@ def accepts(candidate: Dict, baseline: Dict, noise: float) -> Tuple[bool, str]:
         return False, f"提升 {after - before:+.3f} 未超过噪声带 {noise:.3f}"
     refusal_before = baseline.get("refusal_rate_on_null")
     refusal_after = candidate.get("refusal_rate_on_null")
-    if refusal_before is not None and refusal_after is not None and refusal_after < refusal_before:
+    n_null = candidate.get("n_null") or 0
+    if n_null >= MIN_NULL_FOR_GUARD and refusal_before is not None and refusal_after is not None \
+            and refusal_after < refusal_before:
         return False, f"拒答率下降 {refusal_before}→{refusal_after}（守卫项，不允许用来换分）"
+    guard = "" if n_null >= MIN_NULL_FOR_GUARD else f"（拒答守卫未测：只有 {n_null} 道 null 题）"
     new_violations = set(candidate.get("violations") or []) - set(baseline.get("violations") or [])
     if new_violations:
         return False, f"新增不变量违规：{sorted(new_violations)[:2]}"
-    return True, f"提升 {after - before:+.3f} ≥ 噪声带 {noise:.3f}，守卫无回归"
+    return True, f"提升 {after - before:+.3f} ≥ 噪声带 {noise:.3f}，守卫无回归{guard}"
 
 
 def apply_knob(name: str, value: int) -> Tuple[Path, str, str]:
@@ -223,6 +234,12 @@ def main() -> int:
     parser.add_argument("--value", type=int)
     parser.add_argument("--sweep", action="store_true")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--execute", action="store_true",
+                        help="actually apply the change, rebuild and re-measure. Without it "
+                             "the command prints what it WOULD do and stops: a bare "
+                             "`--knob X --value V` otherwise edits the source and starts a "
+                             "~28-minute measurement, which is not what a flag named --knob "
+                             "should do on its own (learned by doing exactly that).")
     parser.add_argument("--noise", type=float, default=0.10,
                         help="minimum quality_macro gain to accept; 10 questions resolve ~0.10 (plan §13.5)")
     args = parser.parse_args()
@@ -249,9 +266,23 @@ def main() -> int:
         if args.value is None:
             print("--value is required with --knob")
             return 1
+        spec = KNobs[args.knob]
+        print(f"plan: {args.knob} {spec['current']} -> {args.value} in {spec['file']}")
+        print(f"      基线 {BASELINE_SCORECARD.name}: quality_macro={fitness(baseline)}, "
+              f"拒答率={baseline.get('refusal_rate_on_null')}")
+        print(f"      验收：提升 ≥ {args.noise}，拒答率不得下降，不得新增违规")
+        print(f"      成本：约 28 分钟（10 题问答 + 判分）")
+        if not args.execute:
+            print("\n(dry plan — 加 --execute 才会真的改源码、重建并测量)")
+            return 0
         return 0 if run_one(args.knob, args.value, baseline, args.noise) else 0
 
     if args.sweep:
+        total = sum(len(spec["candidates"]) for spec in KNobs.values())
+        print(f"plan: {total} candidate(s) over {len(KNobs)} knob(s), 约 {total * 28 / 60:.1f} 小时")
+        if not args.execute:
+            print("\n(dry plan — 加 --execute 才会真的执行)")
+            return 0
         for name, spec in KNobs.items():
             for value in spec["candidates"]:
                 current = read_scorecard(BASELINE_SCORECARD) or baseline

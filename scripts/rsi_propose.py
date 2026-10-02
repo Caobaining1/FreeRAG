@@ -251,7 +251,14 @@ def run_once(prompt_name: str, args, case_limit: int) -> int:
             return 1
         started = time.time()
         candidate = measure(f"rsi-{prompt_name}")
-        baseline = json.loads((RUNS / "baseline.scorecard.json").read_text(encoding="utf-8"))
+        # BASELINE_SCORECARD, not a fresh path: this line used to hardcode
+        # `baseline.scorecard.json` (the FULL dev run) while the candidate was
+        # measured on dev-loop, so the decision compared a 10-question macro
+        # against a 24-question one and the ledger recorded that as the "before"
+        # value. The first iteration's verdict happened to be the same either way
+        # (both differences were below the threshold), which is exactly how a
+        # wrong baseline survives unnoticed.
+        baseline = json.loads(BASELINE_SCORECARD.read_text(encoding="utf-8"))
         ok, reason = accepts(candidate, baseline, args.noise)
         append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{prompt_name}` | "
                        f"{diff:+d} chars: {(proposal.get('rationale') or '')[:80]} | "
