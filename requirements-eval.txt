@@ -1,0 +1,40 @@
+# Evaluation-only dependencies (docs/plan.md §13 Phase A).
+#
+# Install into a DEDICATED venv, never into the sidecar runtime:
+#
+#     /Users/cbn/.local/bin/python3.12 -m venv .venv-ragas
+#     .venv-ragas/bin/pip install -r requirements-eval.txt
+#
+# Why dedicated: ragas pulls langchain + datasets + instructor (~19 base
+# requirements, plus datasets' own tree). The sidecar venv is the app's shipped
+# runtime and is bundled by the desktop build; an eval dependency there would ship
+# to users and can move the version of a library the parser depends on.
+#
+# Why these exact pins: an unpinned install never finished here. `pip install ragas`
+# ran 15 minutes without installing anything and without an error — the backtracker
+# was walking the langchain version matrix, because ragas 0.4.3 requires `langchain*`
+# with NO version bounds, and the newest of each is mutually inconsistent
+# (langchain 1.4.3 wants langchain-core>=1.6, langchain-community 0.4.2 wants
+# <1.0-family core, langchain-openai 1.6.6 wants 1.6 — pip thrashes).
+#
+# The pins below are not guesses: they are the ones pip itself selects when the
+# langchain family is bounded to the 0.3.x line that ragas 0.4.3 shipped against
+# (`pip install --dry-run "langchain<1.0" "langchain-core<1.0" "langchain-community<1.0"
+# "langchain-openai<1.0"`). Pin the DIRECT dependencies; let pip resolve their
+# transitives (pinning all ~50 is brittle and buys nothing).
+#
+# Judge and embeddings are reached over OpenAI-compatible HTTP (see
+# scripts/ragas_eval.py --judge-base/--embed-base), so no model library is needed —
+# `sentence-transformers`, `transformers` and the other `all` extras stay out.
+
+ragas==0.4.3
+
+# The langchain family, bounded to the line ragas 0.4.3 is built against.
+langchain==0.3.30
+langchain-core==0.3.86
+langchain-community==0.3.31
+langchain-openai==0.3.35
+
+# ragas needs datasets>=4.0.0; left unpinned so pip picks a version consistent with
+# whatever pyarrow/numpy it has already chosen.
+datasets>=4.0.0

@@ -1076,3 +1076,341 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 > 3. ~~**"完全本地化"还差三件事**：本地嵌入、SQLite 落盘、Laya 接入~~ → **两条已不成立，修正如下**：
 >    Laya 已接入（§0.2）；**本地嵌入已由决策取消、改为长期托管**（§0.3.1），故"完全本地"这一目标不再成立；
 >    真正剩下的只有存储层能否撑住语料规模（§0.3.2 / §0.1 P0-1）。
+
+---
+
+## 13. RSI 自进化：以评测为适应度的自我改进
+
+> 动机：本项目的瓶颈已由实测定位到**决策质量**（路由、改写、工具选择、充分性判定、枚举声明），而不是解析或检索速度
+> （§10 结论 1：延时全来自生成与 SCA 轮数）。这些决策的载体**全部是文本与常量**——prompt、工具描述、阈值——
+> 因此可以在不训练权重的前提下被自动改进。本节定义怎么改、用什么打分、以及哪些东西绝不能让它改。
+
+### 13.0 诚实的能力边界（先说清楚这不是什么）
+
+**是**：一个有界自我改进循环——在固定的评测集上，系统用 LLM 提出对**自身 prompt / 工具描述 / 数值阈值**的修改，
+用 RAGAS 评分决定接受或回滚，并把每次尝试写进账本。它的"自我"体现在**修改的对象是它自己的指令**。
+
+**不是**：权重训练、架构自改、或开放式自我复制。**单次改进的规模受限于评测的分辨率**（见 §11.5 成本）：
+一次完整评测在这台 CPU 机器上约 1–2 小时，所以循环只能小步走。
+
+**递归出现在 Phase E**：前四阶段改进的是"系统"，Phase E 改进的是"**提出修改的那套规则**"（变异算子）——
+用账本里"哪类修改真的涨了分"的记录反过来重写提案 prompt。这才是 RSI 里"递归"二字的落点，
+在此之前都只是自动化调参。
+
+### 13.1 适应度函数
+
+`fitness = 质量 − λ·成本 − M·违规`
+
+| 项 | 来源 | 说明 |
+| :--- | :--- | :--- |
+| **质量** | RAGAS 四指标：`faithfulness`、`answer_relevancy`、`context_precision`、`context_recall` | 取宏平均；`context_recall` 需要真值上下文，由 MultiHop-RAG 的 `evidence_list` 提供 |
+| **拒答正确性** | `queries_null.json`（证据 0 篇）上的**拒答率** | 单列为守卫指标：把不可回答问题答成的"涨分"是作弊，不是改进 |
+| **成本** | 端到端墙钟（秒/题）+ 生成 token | 不加此项，循环会拿无限延时换质量 |
+| **违规 M** | §11.2 的不变量 | 违反任一 ⇒ 该次修改**直接否决**，即使 RAGAS 上升 |
+
+`λ` 与 `M` 是设计参数，需在 Phase B 用基线标定（先量出"1 分 RAGAS 值多少秒"）。
+
+### 13.2 基因型与守卫（什么能改、什么绝不能）
+
+**可改（基因型）**：
+
+| 类别 | 具体对象 | 位置 |
+| :--- | :--- | :--- |
+| Prompt 文本 | 改写、拆解、成员抽取、工具计划、答案合成、枚举声明 | `internal/agent/{queries,decompose,enumerate,loop,synthesize}.go` 的常量 |
+| 工具描述 | 四个工具的 schema 描述（含 WHEN TO CALL / IF IT FAILS） | `internal/agent/tools.go: ToolSpecs()` |
+| 数值阈值 | `maxSearchQueries`、`enumMaxRounds`、`CoverageActWordsMax`、`DefaultMaxStateChars`、`DefaultLayaMinProbability`、`Spec.SCAMaxRounds/ActionMaxTurns/SnippetsPerQuery`、`defaultMaxSubQuestions`、`defaultToolLimit` | 各文件常量与 `Medium()` |
+| 检索策略 | RRF 融合权重、各工具的默认 k、别名展开规则 | `internal/store/vector.go`、`tools.go` |
+
+**绝不可改（守卫，Phase F 自动校验）**：
+
+1. **评测本身**：`eval/` 下的数据集、拆分、指标定义、判分模型——循环只能读。
+2. **"空池从不通融"**：`loop.go` 里池为空即 INSUFFICIENT 的分支（实测防止过"语料没有"这类假结论）。
+3. **引用与锚定**：成员必须锚定到 passage；答案只能引用证据里的 `[n]`。
+4. **`DecisionKind` 契约**：路由/工具选择=`choice`、SCA=`noul`（§7 那行事故的回归测试）。
+5. **工具面**：仍是 4 个（§6.7）；不允许通过加工具绕过检索困难。
+6. **拒答行为**：`queries_null.json` 上的拒答率是守卫而非优化目标。
+
+**为什么把第 2/3/6 条写成硬守卫**：它们都能被"提高 RAGAS"的梯度反向优化掉——
+少判一次不足、多编一个成员、对空语料也给个答案，三项都会让 faithfulness/relevancy 看起来更好或至少不差，
+而系统实际变差。**自我改进最容易失败的方式，是学会讨好尺子。**
+
+### 13.3 评测基础设施
+
+**数据（已在本机，无需新采集）**：`/Users/cbn/workspace/benchmarks/MultiHop-RAG/`
+- `corpus.json` 609 篇新闻；`pdfs/` 已渲染的 PDF（`make_pdfs.py` 产物）
+- `queries_qa.json` 350 题（comparison/inference/temporal 各 100 + null 50），含 `answer` **与 `evidence_list`（真值证据，可直接作为 RAGAS 的 reference contexts）**
+- `queries_null.json` 不可回答集（拒答率）
+- `eval_common.py` 已有 `recall_at_k / ndcg_at_k / judge_answer / is_refusal` —— **复用，不重写**
+
+**评测 KB**：不复用桌面端 KB（内容随机、无真值）。由 `evidence_pdfs` 反查出题所需的文章集合，
+构建一个**固定、可重建**的 KB，其 doc 集合随评测集一起冻结。
+
+**拆分**：350 题按 `question_type` 分层 → **dev 32 题**（24 可回答 + 8 不可回答，循环内每次迭代用）/ **test 80 题**（60 + 20，只在里程碑报告时用，
+循环从不读）。`eval/` 下冻结为 JSON，随代码提交。**没有这个拆分，Phase D 必然过拟合**。
+
+**判分模型**：RAGAS 默认用 LLM 判分。**必须与生成模型不同源**——同模型自偏好会系统性抬高分数，
+而循环会把这种偏差当成改进吃掉。候选：`.env` 里已有的托管模型（siliconflow）或更强的本地模型。
+判分模型名写进 scorecard，改动它等同于作废历史分数。嵌入用已配置的 `BAAI/bge-m3`。
+
+**产物（Phase A 的可验证交付）**：一条命令输出一份 scorecard：
+
+```json
+{"kb":"eval-kb-v1","dev":"eval/dev.json","judge":"<model>",
+ "n":32,"faithfulness":0.82,"answer_relevancy":0.79,"context_precision":0.61,
+ "context_recall":0.55,"refusal_rate":0.92,"median_latency_s":74.0,
+ "violations":[],"git":"fa75917"}
+```
+
+### 13.4 分阶段执行
+
+| Phase | 做什么 | 产物 / 判据 |
+| :--- | :--- | :--- |
+| **A 基础设施** | 独立评测 venv（`requirements-eval.txt`，**不装进 sidecar 运行时**）、冻结 KB 与 eval 拆分、`ragas_run.py`（驱动内核取 answer+contexts）、`ragas_score.py` | 一条命令给出上述 scorecard；同一输入重跑分数一致 |
+| **B 基线** | 记录基线分数、每题明细与"哪几题失败"、标定 λ（秒/分）；计时成本曲线 | 基线 scorecard + 逐题差异表 |
+| **C 循环 v0：数值** | 对数值阈值做坐标下降：单变量扰动 → 重测 dev → 涨了就留 | 至少一次**被接受**的修改，附前后分数 |
+| **D 循环 v1：文本** | LLM 读 dev 失败样本，对**一个** prompt 提出修改 → 重测 → 接受/回滚 | 一次 prompt 修改的接受记录；账本含被拒项与理由 |
+| **E 递归** | 用账本（哪类提案有效）重写**提案 prompt**本身 | 提案命中率提升的前后对比 |
+| **F 守卫回归** | 不变量测试 + 拒答率 + 成本上限自动校验；违规即回滚 | 一次"为涨分而违规"的提案被自动否决的实例 |
+
+**执行顺序的理由**：A/B 没有捷径（没有可复现的分数，后面全是猜）；C 先于 D，因为数值扫描验证的是**整条测量链路**
+（噪声、方差、成本），而它失败起来比文本修改便宜得多。
+
+### 13.5 效度风险（必须写在计划里，否则会被当成结果）
+
+1. **判分模型自偏好**：同源判分抬分。→ 判分模型与生成模型分离，并写进 scorecard。
+2. **过拟合 dev**：24 题上做几十次选择，必然过拟合。→ test 60 题只在里程碑用；账本记录"dev 涨 / test 未涨"的次数，那本身就是 RSI 的信号。
+3. **n 太小，u 太窄**：24 题的置信区间约 ±10pp，小于它的"改进"不能接受。→ 只有当 dev 提升超过噪声带（Phase B 标定）才接受。
+4. **成本换质量**：RAGAS 不管延时。→ λ 项；并把"轮数/生成 token"计入 scorecard。
+5. **测量噪声伪装成进步**：LLM 判分本身有方差。→ 每个 scorecard 记录重跑一致性（Phase A 的判据）。
+6. **本机算力**：一次 ask ≈ 1–3 分钟（CPU、6.4 tok/s），一次完整评测 1–2 小时。→ 这是循环只能小步走的根本原因；
+   接 GPU 后 Phase C/D 的迭代速度会改变一个数量级。
+
+### 13.6 记录与回滚
+
+- **账本** `docs/rsi-ledger.md`：每次提案一行（`日期 | 对象 | 修改摘要 | dev 前后 | test | 成本 | 接受/否决 | 理由`）。
+  被否决的提案同样入账——"哪些方向试过且无效"是 Phase E 的输入。
+- **回滚**：每次被接受的修改 = 一个独立 git 提交（消息含前后分数），否决则工作区复原。
+  评测产物（scorecard/JSONL）存入 `eval/runs/`，与代码提交一同留档。
+- **可复现**：scorecard 里带 `git` 与判分模型名；KB 与 eval 集带版本号。
+
+### 13.7 Phase A 的实际障碍（如实记录）
+
+**问题**：`pip install ragas` 在本机**未能在 15 分钟内完成依赖解析**——进度停在解析阶段，
+`site-packages` 仍只有 pip，且无报错（`-q` 也掩盖了过程）。ragas 0.4.3 的基础依赖有 19 项
+（`datasets>=4.0.0`、`langchain`/`langchain-core`/`langchain-community`/`langchain_openai`、
+`instructor`、`scikit-network`、`tiktoken`、`networkx` 等），pip 的 backtracker 在这一片版本矩阵里打转。
+
+**处置**：依赖**钉版本**写入 `requirements-eval.txt`（附安装命令与"为什么必须独立 venv"的说明），
+让安装从"探索式"变成"确定性"。判分与嵌入都走 OpenAI 兼容 HTTP，因此不需要任何模型库。
+
+**已完成的 Phase A 部分**：
+- `scripts/ragas_eval.py` 四阶段脚手架（`freeze` / `index` / `run` / `score`），
+  其中 `freeze` **已运行验证**：dev 24 题 / test 60 题 / 需要 101 篇 PDF（真值来自
+  `queries_qa.json` 的 `answer` 与 `evidence_list[].fact`，未自造标注）。
+- `eval/{dev,test}.json` 与 `eval/kb_sources.json` 已冻结（随代码提交，循环只能读）。
+- `eval/` 与 `.venv-ragas/` 已加入 `.gitignore` 的对应例外（评测集要提交，KB 与 venv 不提交）。
+
+**未完成**：`index`（101 篇 PDF ≈ 34 分钟，一次性）与 `score`（依赖 ragas 装好）尚未执行；
+因此 §13.1 的适应度函数**还没有基线数值**，Phase B 的 λ 标定也无从开始。
+
+### 13.8 冒烟测试的实测结论（2026-10-02）
+
+用 4 题冒烟集（3 可回答 + 1 不可回答）打通整条链，得到三个**决定性事实**：
+
+1. **托管判分/嵌入不可用**：`siliconflow` 返回 `402 account balance is insufficient`——**判分与嵌入同时失效**。
+   这是当前 Phase A 的唯一硬阻塞，且**不是 RAGAS 的问题**：同一个托管的 72B 判分器跑 12 个判分任务只用 **84 秒**（≈7s/任务）。
+2. **本地判分不可行（在此规模下）**：本机可用的判分模型是 `qwen3-vl:4b` / `qwen2.5vl:3b`（与生成器 `freerag-qwen3`
+   **不同源**，满足 §13.5 的要求），但一个 `faithfulness` 任务在 CPU 上 **5 分钟未完成**，而 ragas 默认每个任务超时 180s。
+   96 个任务的完整评测按此速度不可行。→ **判分必须托管**（充值或换 key），本地仅作小样本兜底。
+3. **`answer_relevancy` 暂时无法计**：它需要嵌入端点。当前从指标集中移除，并**记录进 scorecard**
+   （`metrics_requested` / `judge_nan_samples`），而不是让它静默变成 NaN 被平均掉。
+
+**同时修掉三个脚手架自身的缺陷**（否则 2 小时后的评分会白跑）：
+- `score` 阶段未加载 `.env` → 判分 key 为空；
+- ragas 0.4 的 `EvaluationResult` **不是映射**（`dict(result)` 抛 `KeyError: 0`）→ 改用 `to_pandas()`，
+  并把**逐题分数**另存为 `<run>.scores.json`（账本需要知道"哪几题被改动影响"）；
+- ragas 的 **180s/任务默认超时**配 `raise_exceptions=False` 会把失败**静默成 NaN**（首轮冒烟 9/9 任务全 Timeout 却"成功"）
+  → 超时改为参数、NaN 题数写进 scorecard。
+
+**一个未验证项**：冒烟里那道不可回答题的 `refusal_rate_on_null = 0.0`，需要看它的实际答案才能判断是
+"答了但没拒答"（真缺陷）还是我的拒答正则太窄——**不要把它当成结论**。
+
+**已启动**：基线建库（101 篇）+ dev 32 题问答在后台运行（约 2 小时）；判分一可用，只剩约 10 分钟。
+
+### 13.9 判分器的最终实测（2026-10-02，更正 §13.8 的一部分）
+
+**§13.8 里"本地判分不可行"的结论保留，但理由要说准**——当时我拿 `qwen3-vl:4b` 测，那是**选错了模型**：
+本地真正的模型是 **Qwen3-4B（`freerag-qwen3`）**，一次短判分调用 **36.5 秒**、JSON 合法，
+比 VL 那个（>5 分钟未完）快一个数量级。**换对模型后结论没变，但原因变了，而且是可测的**：
+
+| 配置 | 单任务 | 96 个任务（dev 32 × 3 指标） |
+| :--- | ---: | ---: |
+| 托管 72B（需余额） | **≈7s**（12 任务 84s） | ≈10 分钟 |
+| 本地 Qwen3-4B，未截断 | **391s**，且部分任务直接 400 | ≈11 小时 ✗ |
+| 本地 Qwen3-4B，上下文截到 5×1200 | **>7 分钟仍未完成** | 不可行 ✗ |
+
+两个机制性原因（都不是"模型不行"，而是**量级**）：
+1. **窗口**：Ollama 默认 `num_ctx=4096`，而 ragas 的判分 prompt 在 10–17 篇上下文下实测 **5786–5910 token**
+   → `400 exceeds the available context size`，任务在被打分前就失败。
+2. **输出长度**：判分要"抽出全部陈述再逐条判定"，4B 在 CPU 上约 6 tok/s，一次 391s 说明它写了 ~2300 token。
+   截断输入能缓解窗口问题，却仍远达不到可用吞吐。
+
+**结论（未变，依据更硬）**：RSI 循环要跑得动，**判分必须托管**。本地判分保留为小样本兜底路径，
+且它**是生成器本身**（`judge_is_generator` 已写进 scorecard）——自偏好会抬高绝对分，
+所以绝对分数只能当参考；**相对前后对比在判分器与评测集冻结的前提下仍然有效**，这也正是 RSI 循环需要的东西。
+
+**已加入脚本的参数**（托管判分同样需要）：`--judge-max-contexts` / `--judge-context-chars` / `--judge-timeout` /
+`--judge-workers` / `--metrics`，并且 scorecard 记录实际使用的截断与 NaN 题数。
+
+### 13.10 决定：判分保持本地（2026-10-02）
+
+**决定**：不引入托管判分，判分固定用本地 **Qwen3-4B（`freerag-qwen3`）**；承认它是生成器本身。
+
+**这个决定带来的三个硬性后果，必须写进循环的设计里**（否则 Phase C/D 会跑出一个不可信的数字）：
+
+1. **迭代成本决定 dev 规模**：一次判分任务在 CPU 上以分钟计，因此循环内部只能用 **dev 子集（≤8 题）**，
+   完整 dev 32 / test 80 只在里程碑时跑。§13.4 的"小步走"从建议变成了约束。
+2. **指标收窄**：只保留**不需要嵌入**且 LLM-only 的指标（`faithfulness`，必要时 + `context_recall`）；
+   `answer_relevancy` 必须有嵌入端点，本地缺失，故不参与。**质量信号因此只覆盖"有没有编造"这一维**——
+   一个只改善检索广度、不改善 groundedness 的改动，在这个适应度下**看不见**。
+3. **接受阈值必须放宽**：n=8 的置信区间约 **±20pp**。故循环只能承认**大幅改进**（建议阈值 ≥25pp），
+   并把"dev 涨、test 未涨"当作噪声而非成果记入账本。**这不是保守，是这套判分器能给出的分辨率上限。**
+
+**兜底路径**：`--judge-max-contexts / --judge-context-chars / --judge-timeout / --metrics` 已参数化；
+若日后余额恢复，只需换 `--judge-model/--judge-base` 并把指标集加回，历史 scorecard 因记录了判分器与截断参数而可比。
+
+### 13.11 判分改为托管（2026-10-02，取代 §13.10 的本地约束）
+
+**配置**：判分用托管 OpenAI 兼容端点（`RAGAS_JUDGE_BASE` / `RAGAS_JUDGE_MODEL` / `JUDGE_API_KEY` 写在 `.env`，
+该文件已在 `.gitignore` 第 42 行，**key 不进版本库**）。模型 `deepseek-v4.1-flash`，
+`judge_is_generator: False` —— **§13.5 的效力要求恢复成立**（判分与生成不同源）。
+
+**实测**：9 个判分任务约 2–4 分钟（15–68s/任务，4 并发）。→ **§13.10 的三条本地约束不再成立**：
+dev 可以回到 **32 题**、指标可以保留 **3 个**、接受阈值可以回到 §13.4 的设计（不再需要 25pp 的粗阈值）。
+完整 dev 32 × 3 指标 ≈ **15–30 分钟/次评测**，Phase C/D 的迭代速度因此回到可做迭代的量级。
+
+**该端点没有嵌入能力**（`bge-m3` / `text-embedding-3-small` 均被拒：`model is not supported`），
+故 `answer_relevancy` 仍不参与，指标集为 `faithfulness` + `context_precision` + `context_recall`。
+
+**一个必须记下的判分器特性**：`deepseek-v4.1-flash` 是**推理模型**，reasoning token 与 JSON 共用同一个
+`max_tokens` 预算。首轮 3 个 `faithfulness` 任务里 2 个报
+`LLMDidNotFinishException: The LLM generation was not completed. Please increase the max_tokens`，
+于是 scorecard 给出了**只覆盖 1 个样本的均值**。→ 已加 `--judge-max-tokens`（默认 8192）。
+**教训**：scorecard 里的 `judge_nan_samples` 必须看——没有它，一个 0.4667 的 `faithfulness` 看起来完全正常。
+
+### 13.12 无嵌入对评测的影响（实测核实，2026-10-02）
+
+**指标侧：正在用的三个不受影响。** 逐个查 `dataclass` 字段：`faithfulness` / `context_precision` / `context_recall`
+只声明 `llm`；**只有 `answer_relevancy` 声明 `embeddings`** —— 所以"没有嵌入模型"影响的是被移除的那一个，不是这三个。
+
+**但被移除的那一个正好是唯一的"回答↔问题"维度**，这是真缺口：
+`context_precision` / `context_recall` 比的是**检索到的上下文 vs 真值**，`faithfulness` 比的是**回答 vs 上下文**。
+**没有一个指标看"回答有没有切题"** —— 一个忠实但答非所问、或把证据整段倒出来的回答，在这三项上可以满分。
+**对 RSI 循环来说这是明确的作弊通道**（§13.2 的守卫拦不住它）。而且 §13.11 已确认本端点无嵌入能力。
+
+**能不能不用嵌入补回这一维？实测四个候选，两个不行、两个要换接口**：
+
+| 候选 | 结果 |
+| :--- | :--- |
+| `collections.AnswerRelevancy` | ✗ `__init__` 要求 `embeddings`（v2 实现仍是嵌入式的，字段自省会骗人） |
+| `collections.AnswerCorrectness` | ✗ `Embeddings are required for semantic similarity scoring` |
+| `collections.AnswerAccuracy` | **可用但需换接口**：`Collections metrics only support modern InstructorLLM. Found: ChatOpenAI. Use: llm_factory` —— **不需要嵌入** |
+| `collections.FactualCorrectness` | 同上，需 `llm_factory` |
+
+**结论与下一步**：用 `ragas.llms.llm_factory` 造一个 InstructorLLM 指向同一端点，加 **`AnswerAccuracy`（回答 vs 真值，无需嵌入）**
+作为第四个指标；备选是复用 `benchmarks/MultiHop-RAG/eval_common.py` 自带的 `judge_answer`（同样是 LLM-only）。
+**在加上它之前，`quality_macro` 不能当作完整质量信号使用** —— 一个提高前三项、却让回答更不切题的改动会被判为改进。
+
+**顺带核实**：应用自身的检索**不受影响** —— 冒烟与基线的检索调用全部是 `hybrid`，说明 siliconflow 的嵌入在检索路径上正常工作；
+余额不足只卡住了昂贵的 72B 判分调用。
+
+### 13.13 基线的检索是降级的（必须重跑）——并更正我在对话里的一处错误结论
+
+**事实（按时间线核对）**：
+
+| 阶段 | 检索返回的注释 | 含义 |
+| :--- | :--- | :--- |
+| 冒烟问答 07:56–08:06 | `hybrid` 5/5 | 嵌入正常 |
+| 基线问答 09:01 起 | **`keyword only` 26/26**（含 `embed failed`） | **嵌入失败，退化为纯关键词** |
+
+**siliconflow 的嵌入端点现在返回 `402 account balance is insufficient`**（与 72B 判分同一个余额问题），
+余额是在两次运行之间耗尽的（很可能就是被那批判分调用用掉）。
+**机制**：即使 KB 里存有向量，**查询这一侧嵌入失败**就无法做稠密检索，`hybrid_search` 会按设计降级为关键词并如实标注。
+
+**后果（两点，都要记账）**：
+1. **`eval/runs/baseline.jsonl` 里的 32 题答案不是一个有效基线** —— 它由关键词检索产出，不代表系统设计的样子。
+   余额恢复后必须**重建 KB 并重跑**（或至少重跑，若向量仍在）。
+2. `answer_relevancy` 在余额恢复前无法计分（它需要嵌入），scorecard 会记 NaN ✓。
+
+**更正**：我在对话里说过"应用自身的检索不受影响——冒烟与基线的检索调用全部是 hybrid"。
+**这句是错的**：我只核对了冒烟那 5 次就替基线下了结论。基线是 26/26 keyword-only。教训与 §13.11 同类——
+**别用一次运行的证据去断言另一次运行的状态**。
+
+**按用户要求已对接**：RAGAS 的嵌入改用**应用自身那套配置**（`internal/embed/siliconflow.go` 的 base +
+`FREERAG_EMBED_MODEL` + `FREERAG_SILICONFLOW_KEY`），而非判分的 key —— 这样判分侧的相似度几何与检索侧一致。
+
+**约束（用户要求记住，2026-10-02）**：本项目的 siliconflow 嵌入**只能选 `BAAI/bge-m3`**
+（该提供商不提供其他嵌入模型；`text-embedding-3-small` 等写法一律被拒）。
+因此 `scripts/ragas_eval.py --embed-model` 视为固定值，评测侧与检索侧必须用**同一个**嵌入模型——
+换模型不会报错，只会静默地拿两个不同向量空间做相似度。
+
+### 13.14 方案 B 执行记录（2026-10-02）
+
+余额恢复后按 B 重建：
+
+| 步骤 | 结果 |
+| :--- | :--- |
+| 校验嵌入 | 返回真实 1024 维向量 ✓（不再是 402） |
+| 旧基线留档 | `eval/runs/baseline-keywordonly.jsonl`（19 题，**保留作为降级配置的证据**） |
+| 重建 KB | 新目录 `eval/data-hybrid`，KB `417629bda48bdd6c`，**5.5MB** vs 旧 1.7MB → 差的就是向量 |
+| 重跑 dev | 32 题（题目单题 178–338s，约 1.5–2 小时） |
+| 判分 | 自动串在后面，带 `--with-answer-relevancy`（嵌入恢复后这一维才可计） |
+
+**一个必须记住的坑**：重建 KB **必须 `--force`**。索引任务按内容指纹跳过未变的文件——不加 `--force` 时它会"成功地"跳过全部 101 篇，
+而 KB 里留着的正是嵌入故障期间写入的**无向量 chunk**，表现为检索静默退化为 keyword-only。
+（已在 `scripts/ragas_eval.py index --force` 中实现并注释。）
+
+**顺带修**：`run` 阶段原先只保留 `trace[-40:]`，而复杂子问题的工具注释在 trace 前段——
+**截断掉的恰好是"这次检索是 hybrid 还是 keyword-only"那几行**。已放宽到 200，否则事后无法从产物里判断检索是否降级。
+
+**第 1 题暴露的行为问题**（候选改进项，交给 Phase C/D）：模型把两个子问题的各两轮都花在
+`metadata_search(doc_id contains "TechCrunch")` / `contains "The Age"` 上，各返回 0 篇。
+`doc_id` 是文件名，**带的是标题而不是发布方**，所以按发布方过滤必然为空——与 §13.9 记录的"编造元数据取值"同类。
+
+### 13.15 基线完成，以及一个被自己测出来的测量伪影（2026-10-02）
+
+**基线（hybrid 检索、32 题、判分 `deepseek-v4.1-flash` 与生成不同源）**：
+
+| 指标 | 值 |
+| :--- | ---: |
+| `faithfulness` | 0.6038 |
+| `answer_relevancy` | 0.4953 |
+| `context_precision` | 0.2944 |
+| `context_recall` | 0.5000 |
+| **`quality_macro`** | **0.4734** |
+| `refusal_rate_on_null` | 0.75（8 题中 6 题拒答） |
+| `violations` | 0 |
+| 中位延时 | 208s/题 |
+
+**伪影与更正**：第一版基线给出 `quality_macro = 0.2716`，我怀疑它是我自己的测量工具造成的，**实测证实**：
+
+| 指标 | 截断版（前 5 篇 ×1200 字符） | 完整上下文 | 差 |
+| :--- | ---: | ---: | ---: |
+| `faithfulness` | 0.2681（**12/24 NaN**） | 0.6038（0 NaN） | **+0.336** |
+| `context_recall` | 0.1667 | 0.5000 | **+0.333** |
+| `context_precision` | 0.1889 | 0.2944 | +0.105 |
+| `answer_relevancy` | 0.4626 | 0.4953 | +0.033 |
+| `quality_macro` | 0.2716 | **0.4734** | **+0.202** |
+
+**机制**：`context_precision` / `context_recall` 是**针对喂给判分器的那些上下文**算的，`faithfulness` 要用上下文去验证答案里的每条断言——
+**少喂上下文，等于让判分器去否定它没看到的证据**。截断是我为本地 4B 判分器的 4096 窗口加的权宜之计，
+托管判分根本不需要它，但我把默认值留了下来，于是它静默压低了**全部四个**指标。
+两条 `max_tokens` 相关的问题也是同一来源：默认 8192 对推理模型不够 → 12 个任务被截断 → 一半样本变 NaN。
+
+**处置**：默认改为**不截断**（`--judge-max-contexts 0` / `--judge-context-chars 0`）且 `--judge-max-tokens 32768`；
+完整上下文的 scorecard 已提升为正式基线（`eval/runs/baseline.scorecard.json`）。
+
+**教训（与 §13.11 的静默 NaN 同类，但更贵）**：**测量工具的默认值会伪装成系统的能力**。
+这版 0.2716 如果被当作基线，后面每一次 Phase C 的"改进/否决"都会建立在错的尺子上——
+而且它会系统性地把"改动检索/上下文"的提案判成有效，因为那些改动在这个伪影下最容易"涨分"。
+**判分器与检索侧必须共用同一套上下文**，这条以后写进任何换判分器的变更清单里。

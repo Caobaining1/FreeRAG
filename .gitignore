@@ -52,3 +52,12 @@ venv/
 # Vendored runtime for packaging: build-installer.sh fetches the Qdrant binary
 # here so electron-builder has a stable path to bundle. Regenerable, and 73 MB.
 /desktop/vendor/
+
+# Evaluation venv (ragas pulls langchain/datasets; kept out of the sidecar runtime)
+/.venv-ragas/
+
+# Evaluation workspace: KBs, runs and the frozen split. NOT pushed (user's call,
+# 2026-10-02). Nothing here is lost by that: `scripts/ragas_eval.py freeze` rebuilds
+# the split deterministically from benchmarks/MultiHop-RAG, and the KB is rebuilt by
+# the `index` stage.
+/eval/
