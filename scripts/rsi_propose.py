@@ -378,7 +378,32 @@ def quality(scorecard: Optional[Dict]) -> object:
 MIN_NULL_FOR_GUARD = 4
 
 
+METRIC_NAMES = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
+
+def measurement_is_whole(candidate: Dict, baseline: Dict) -> Optional[str]:
+    """None when both runs were scored on the same questions, else why not.
+
+    A metric whose judge call failed is NaN, and NaN samples are DROPPED from that
+    metric's mean — so a run with more failed judge calls has its macro computed over a
+    smaller, easier sample set and can score HIGHER for that. Measured: a candidate had 3
+    NaN context_precision samples against the baseline's 1 and the macro moved +0.054,
+    which is not decidable from those two numbers. The floor is deliberately loose (one
+    lost sample is tolerated) and any breach refuses the decision rather than shrinking it.
+    """
+    for name in METRIC_NAMES:
+        before = (baseline.get("judge_nan_samples") or {}).get(name, 0)
+        after = (candidate.get("judge_nan_samples") or {}).get(name, 0)
+        if after > max(before, 1):
+            return (f"measurement incomplete: {name} lost {after} sample(s) to judge failures "
+                    f"against the baseline's {before}; re-score before deciding")
+    return None
+
+
 def accepts(candidate: Optional[Dict], baseline: Dict, noise: float) -> Tuple[bool, str]:
+    """"""
+    incomplete = measurement_is_whole(candidate, baseline)
+    if incomplete:
+        return False, incomplete
     if candidate is None:
         return False, "运行或判分未完成"
     before, after = quality(baseline), quality(candidate)
