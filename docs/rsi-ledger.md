@@ -40,6 +40,7 @@
 > 在 9 题 dev-loop 上，只有 **≥0.10~0.15** 的变化才可能被分辨。已据此改脚本（禁止扫死旋钮）
 > 与会改噪声带估计（`docs/plan.md` §13.17）。
 | 2026-10-02 | `SnippetsPerQuery` | → 10 | 0.3691 | 0.4293 | 49 min | **接受** | 提升 +0.060 ≥ 噪声带 0.050，守卫无回归（拒答守卫未测：只有 1 道 null 题） |
+<<<<<<< HEAD
 | 2026-10-02 | `decomposeSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases do not contain the expected source articles (e.g., 'The Age', 'Fortune', 'Th |
 | 2026-10-02 | `rewriteSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases are mostly irrelevant to the questions (e.g., sports, antitrust, unrelated n |
 | 2026-10-02 | `synthesizeSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases are mostly irrelevant to the questions (e.g., cricket schedules, stadium cha |
@@ -63,3 +64,5 @@
 > 且**拒答率 0.75 → 0.625**（守卫失败）。dev-loop 的 +0.060 不可复现。
 > 见 `docs/plan.md` §13.21：**dev-loop 接受只是筛选，判决需全 dev @0.2°**。
 > 回滚提交 `37e44b2`。
+=======
+>>>>>>> parent of a005ab6 (Refuse grep probes built from words that match the whole corpus)

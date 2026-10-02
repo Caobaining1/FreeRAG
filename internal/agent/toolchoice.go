@@ -142,67 +142,6 @@ func renderChoiceState(question string, evidence []store.Hit, attemptsSummary st
 // document" options, so a large pool cannot pad the option set.
 const maxCandidateListChunks = 2
 
-// grepMinTermLength is the shortest term a grep probe may be built from.
-const grepMinTermLength = 3
-
-// grepStopWords are the words a grep probe must never be built from: the ordinary
-// function words, plus the nouns a model reaches for when asked what is missing and
-// which name nothing in particular.
-//
-// A grep probe costs a round, so it is worth one only when the pattern is an EXACT and
-// DISCRIMINATING string. The checker reports what the answer is missing, and on the
-// MultiHop-RAG dev split it reported "the" — which this function's caller then turned
-// into grep("the"), matching every chunk in the corpus. Six unrelated questions were
-// answered from pools whose first passage was the same sports article, the query the
-// rewriter had produced ("TechCrunch article Amazon large language model training kids
-// responses") was never searched at all, and those questions scored 0.11-0.23 while
-// their evidence sat in the index the whole time — 100% of it present, 0-3% retrieved
-// (scripts/evidence_check.py). The filter lives here rather than in the checker's
-// prompt because the list arrives from a model: a prompt can ask for content words, but
-// only the consumer can refuse what is not one.
-var grepStopWords = map[string]bool{
-	// Articles, conjunctions, prepositions, pronouns, auxiliaries, degree words.
-	"the": true, "a": true, "an": true, "and": true, "or": true, "but": true, "if": true,
-	"of": true, "to": true, "in": true, "on": true, "at": true, "for": true, "with": true,
-	"by": true, "from": true, "as": true, "into": true, "over": true, "under": true,
-	"about": true, "after": true, "before": true, "than": true, "then": true, "that": true,
-	"this": true, "these": true, "those": true, "it": true, "its": true, "he": true,
-	"she": true, "they": true, "them": true, "his": true, "her": true, "their": true,
-	"is": true, "are": true, "was": true, "were": true, "be": true, "been": true,
-	"being": true, "has": true, "have": true, "had": true, "do": true, "does": true,
-	"did": true, "will": true, "would": true, "can": true, "could": true, "should": true,
-	"may": true, "might": true, "must": true, "not": true, "no": true, "yes": true,
-	"all": true, "any": true, "both": true, "each": true, "more": true, "most": true,
-	"other": true, "some": true, "such": true, "only": true, "own": true, "same": true,
-	"so": true, "too": true, "very": true, "just": true, "also": true, "there": true,
-	"when": true, "where": true, "which": true, "who": true, "whom": true, "what": true,
-	"how": true, "why": true, "whether": true, "while": true,
-	// Nouns that name no particular thing. A model asked what is missing reaches for
-	// these, and a probe for them returns the corpus back.
-	"information": true, "details": true, "detail": true, "content": true, "article": true,
-	"articles": true, "document": true, "documents": true, "passage": true, "text": true,
-	"answer": true, "question": true, "evidence": true, "mention": true, "mentioned": true,
-	"statement": true, "source": true, "sources": true, "report": true, "news": true,
-	"example": true, "thing": true, "things": true, "something": true, "anything": true,
-	"data": true, "fact": true, "facts": true, "claim": true, "claims": true,
-}
-
-// greppableTerms keeps the missing terms a grep probe can discriminate with.
-//
-// Order is preserved, so the first terms the checker named are the ones probed, and a
-// term it named that is a function word simply does not become a round.
-func greppableTerms(missing []string) []string {
-	var out []string
-	for _, term := range missing {
-		term = strings.TrimSpace(term)
-		if term == "" || len([]rune(term)) < grepMinTermLength || grepStopWords[strings.ToLower(term)] {
-			continue
-		}
-		out = append(out, term)
-	}
-	return out
-}
-
 // buildCandidates builds the executable options for one round.
 //
 // Every call is deterministic from state the loop already holds, and calls
@@ -244,11 +183,14 @@ func buildCandidates(
 		)
 	}
 
-	// One exact-match probe per missing term — but only for terms a probe can
-	// discriminate with. See greppableTerms.
-	for index, term := range greppableTerms(missing) {
+	// One exact-match probe per missing term.
+	for index, term := range missing {
 		if index >= maxGrepLegs {
 			break
+		}
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
 		}
 		add(
 			ToolCall{Name: ToolGrepSearch, Arguments: map[string]any{"pattern": term}},
