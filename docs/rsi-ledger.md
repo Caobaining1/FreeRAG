@@ -42,3 +42,18 @@
 | 2026-10-02 | `SnippetsPerQuery` | → 10 | 0.3691 | 0.4293 | 49 min | **接受** | 提升 +0.060 ≥ 噪声带 0.050，守卫无回归（拒答守卫未测：只有 1 道 null 题） |
 | 2026-10-02 | `decomposeSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases do not contain the expected source articles (e.g., 'The Age', 'Fortune', 'Th |
 | 2026-10-02 | `rewriteSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases are mostly irrelevant to the questions (e.g., sports, antitrust, unrelated n |
+| 2026-10-02 | `synthesizeSystemPrompt` | — | — | — | — | 无提案 | The retrieved passages in the failing cases are mostly irrelevant to the questions (e.g., cricket schedules, stadium cha |
+| 2026-10-02 | `synthesizeSystemPrompt` | — | — | — | — | 无提案 | The failures are not caused by the prompt: the retrieved passages do not contain the expected evidence (context_sample s |
+| 2026-10-02 | `synthesizeSystemPrompt` | — | — | — | — | 无提案 | The failures are dominated by retrieval problems (context_precision and context_recall are 0 or near 0, and the context  |
+| 2026-10-02 | `synthesizeSystemPrompt` | +99 chars: The failures show the model answers the sub-question's implied comparison instea | 0.4293 | 0.3745 | 0 min | 否决 | 提升 -0.055 未超过实测噪声带 0.050 |
+
+> **勘误（2026-10-02，`synthesizeSystemPrompt` 那行）**：该行原先记的描述是 **"+205 chars"**，
+> 那是**重跑时新生成的提案**，而**实际被测的是 +99 字符的版本**
+> （"Answer the original question's exact wording and intent, not the sub-questions' framing
+> or any implied yes/no."）。**数值与判决无误**（0.4293 → 0.3745，否决 ✓ 干净测量：NaN 0/0）。
+> 已修描述，并在机制上堵住：提案在**应用前**写入 `rsi-<prompt>.proposal.json`，
+> 已有测量时**复用记录中的提案**而不是重新提案（提案模型即使 temperature=0 也非确定）。
+>
+> **判定**：这条 prompt 改动**确实让结果变差**（四项指标全降或持平），
+> 说明"要求答原问题"这个方向不对——**加规则不等于改善了行为**。
+> 这是第一次在**干净的测量**下被否决的 prompt 改动，也是基因组扩展后第一次真实 D 迭代。

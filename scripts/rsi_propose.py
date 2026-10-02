@@ -55,6 +55,13 @@ REPO = Path(__file__).resolve().parent.parent
 PROMPTABLE_FLOOR = 0.5
 LEDGER = REPO / "docs" / "rsi-ledger.md"
 RUNS = REPO / "eval" / "runs"
+
+# The comparison point: the dev-loop reduction of the baseline, i.e. the SAME questions
+# and the same sampling condition the candidate is measured under. This name was used
+# here before it was defined — the first run of this loop finished its measurement and
+# its judging and then died one line later on a NameError, leaving the candidate edit in
+# the tree with no verdict and an hour of measurement thrown away.
+BASELINE_SCORECARD = RUNS / "devloop-baseline.scorecard.json"
 GO = REPO / ".toolchain" / "go" / "bin" / "go"
 PY = REPO / ".venv314" / "bin" / "python"
 RAGAS_PY = REPO / ".venv-ragas" / "bin" / "python"
@@ -301,15 +308,32 @@ def run_once(prompt_name: str, args, case_limit: int) -> int:
     path, whole, current = read_prompt(prompt_name)
     print(f"prompt {prompt_name}: {len(current)} chars in {path.relative_to(REPO)}")
 
-    cases = worst_cases(case_limit)
-    print(f"worst {len(cases)} case(s): scores {[c['score'] for c in cases]}")
+    scorecard_path = RUNS / f"rsi-{prompt_name}.scorecard.json"
+    proposal_path = RUNS / f"rsi-{prompt_name}.proposal.json"
 
-    proposal = propose(prompt_name, current, cases, args.proposer_model, args.proposer_base)
-    if proposal.get("no_edit"):
-        print(f"proposer declined: {proposal.get('rationale')}")
-        append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{prompt_name}` | — | — | — | — | 无提案 | "
-                       f"{proposal.get('rationale', '')[:120]} |"])
-        return 0
+    if proposal_path.exists() and scorecard_path.exists() and not args.fresh:
+        # A finished measurement is RE-DECIDED, not re-proposed.
+        #
+        # The proposal is written down so the ledger can name what was MEASURED. Without
+        # it, re-running proposes afresh — the proposer is not deterministic even at
+        # temperature 0 — and the verdict is then recorded against text that was never
+        # run: the first synthesis verdict was written as "+205 chars" when the measured
+        # edit was +99. A record that does not describe the experiment is worse than no
+        # record, because it is trusted.
+        proposal = json.loads(proposal_path.read_text(encoding="utf-8"))
+        print(f"re-deciding the recorded proposal "
+              f"({len(proposal.get('new_prompt', '')) - len(current):+d} chars; --fresh re-proposes)")
+    else:
+        cases = worst_cases(case_limit)
+        print(f"worst {len(cases)} case(s): scores {[c['score'] for c in cases]}")
+        proposal = propose(prompt_name, current, cases, args.proposer_model, args.proposer_base)
+        if proposal.get("no_edit"):
+            print(f"proposer declined: {proposal.get('rationale')}")
+            append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{prompt_name}` | — | — | — | — | 无提案 | "
+                           f"{proposal.get('rationale', '')[:120]} |"])
+            return 0
+        # Recorded before it is applied, so the file always names the experiment.
+        proposal_path.write_text(json.dumps(proposal, ensure_ascii=False, indent=2), encoding="utf-8")
     new_prompt = proposal.get("new_prompt", "")
     if not new_prompt or new_prompt == current:
         print("proposer returned no usable change")
@@ -336,7 +360,14 @@ def run_once(prompt_name: str, args, case_limit: int) -> int:
             subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
             return 1
         started = time.time()
-        candidate = measure(f"rsi-{prompt_name}")
+        if scorecard_path.exists() and not args.fresh:
+            # Reuse a finished measurement. It costs about an hour, so a crash in the
+            # last step must not discard it — which is not hypothetical: the first run of
+            # this loop died on the line below after the judging had already finished.
+            print(f"reusing {scorecard_path.name} (--fresh re-measures)")
+            candidate = json.loads(scorecard_path.read_text(encoding="utf-8"))
+        else:
+            candidate = measure(f"rsi-{prompt_name}")
         # BASELINE_SCORECARD, not a fresh path: this line used to hardcode
         # `baseline.scorecard.json` (the FULL dev run) while the candidate was
         # measured on dev-loop, so the decision compared a 10-question macro
@@ -437,6 +468,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--prompt", choices=sorted(PROMPTS))
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--fresh", action="store_true",
+                        help="re-measure even when this prompt already has a scorecard")
     parser.add_argument("--dry-run", action="store_true", help="propose and print, change nothing")
     parser.add_argument("--cases", type=int, default=6, help="how many worst questions to show the proposer")
     parser.add_argument("--noise", type=float, required=False, default=None,
