@@ -35,6 +35,12 @@ REPO = Path(__file__).resolve().parent.parent
 METRICS = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
 GRAM = 5
 
+# Below this share of the evidence's 5-grams, the run retrieved essentially none of what
+# the question needs. Shared with rsi_propose.py, which uses it to keep retrieval-failure
+# cases out of the proposer's input: a prompt cannot fix them, and showing them made three
+# Phase D iterations decline instead of editing.
+RETRIEVAL_FLOOR = 0.15
+
 
 def normalize(text: str) -> str:
     text = text.lower().replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
@@ -143,9 +149,9 @@ def main() -> int:
 
     print(f"{'#':>3} {'score':>6} {'in corpus':>10} {'in retrieved':>13}  verdict")
     for i, score, in_corpus, in_retrieved, _ in rows:
-        if in_corpus < 0.15:
+        if in_corpus < RETRIEVAL_FLOOR:
             verdict = "EVIDENCE ABSENT from the corpus — this system cannot answer it"
-        elif in_retrieved < 0.15:
+        elif in_retrieved < RETRIEVAL_FLOOR:
             verdict = "in the corpus, not retrieved — the retrieval strategy is the lever"
         else:
             verdict = "evidence retrieved — a generation/prompt problem"

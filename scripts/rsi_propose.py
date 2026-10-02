@@ -44,9 +44,15 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from evidence_check import RETRIEVAL_FLOOR, text_coverage
 from typing import Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parent.parent
+
+# Evidence this well retrieved means the answer had the material in front of it, so a prompt
+# CAN change the outcome. Below it the case is ambiguous and is only used to fill a shortlist.
+PROMPTABLE_FLOOR = 0.5
 LEDGER = REPO / "docs" / "rsi-ledger.md"
 RUNS = REPO / "eval" / "runs"
 GO = REPO / ".toolchain" / "go" / "bin" / "go"
@@ -69,6 +75,17 @@ PROMPTS: Dict[str, Dict[str, str]] = {
         "file": "internal/agent/loop.go",
         "why": "the planner's own rules (scope, batching, repeats)",
     },
+    "synthesizeSystemPrompt": {
+        "file": "internal/agent/synthesize.go",
+        # The prompt that writes the final answer of the complex path — which is 19 of
+        # the 24 answerable dev questions, and the cluster where the evidence HAS been
+        # retrieved (scripts/evidence_check.py). It was absent from this table, so the
+        # loop could not edit the writer responsible for the largest failure cluster,
+        # while spending three iterations on prompts whose output the complex path does
+        # not even use: the sub-question answers are discarded, and the synthesis reads
+        # the merged evidence (see synthesize).
+        "why": "writes the final answer of the complex path from the merged pool",
+    },
     "decomposeSystemPrompt": {
         "file": "internal/agent/decompose.go",
         "why": "how the question is split into sub-questions",
@@ -90,12 +107,15 @@ Rules:
 - Keep every existing rule that is not contradicted by the failures. Rules exist because of specific
   observed failures; deleting one to fix another usually trades one failure for the old one.
 - Do not add facts about the corpus, do not name specific answers, and do not mention the evaluation.
-- Use the retrieved passages to tell WHICH problem this is. If they do not contain the expected
-  material, no prompt can fix that and you must set "no_edit": true. If they DO contain it and the
-  answer missed it, that is a prompt problem and you should propose the edit.
+- Every case was selected because the retrieved passages DO contain the expected evidence — each
+  case states how much, and lists the sentences and the passages that carry it, not the first ones
+  retrieval returned. The material was in front of the writer, and the reply still missed it.
+  That is this prompt's problem to fix, so propose the edit.
+- Set "no_edit": true only when no wording of THIS prompt could have changed the outcome — not
+  because the case is hard, and not because retrieval is imperfect. Cases whose evidence was never
+  retrieved are not shown to you at all. A decline has cost most of a day: four in a row, each
+  defensible, none of which was ever checked against a measurement.
 - The prompt is a raw Go string literal: no backticks, no unescaped double quotes inside it.
-- If the failures do NOT look like something this prompt can fix (they may be retrieval, parsing or
-  scoring problems), say so instead of guessing: set "no_edit" to true and explain.
 
 Reply with JSON only:
 {"no_edit": false, "rationale": "one sentence", "new_prompt": "the complete new prompt text"}"""
@@ -117,7 +137,7 @@ def read_prompt(name: str) -> Tuple[Path, str, str]:
 
 
 def worst_cases(limit: int) -> List[Dict]:
-    """The questions the baseline answered worst, with what the system produced."""
+    """The questions the baseline answered worst — among those a prompt could have fixed."""
     records = [json.loads(line) for line in (RUNS / "baseline.jsonl").read_text(encoding="utf-8").splitlines()
                if line.strip()]
     scorecard = json.loads((RUNS / "baseline.scores.json").read_text(encoding="utf-8"))
@@ -134,18 +154,68 @@ def worst_cases(limit: int) -> List[Dict]:
     pairs = [(r, s, mean(s)) for r, s in zip(answerable, scorecard)]
     pairs = [p for p in pairs if p[2] is not None]
     pairs.sort(key=lambda p: p[2])
-    return [{"question": r["question"], "expected": r["ground_truth"],
-             "answer": (r["answer"] or "")[:900], "score": round(m, 3),
-             "scores": {k: s.get(k) for k in metrics},
-             # What retrieval actually returned, and how much of it. Without this the
-             # proposer sees a low score and has to GUESS whether the queries went
-             # the wrong way or the corpus had nothing to give — and its two answers
-             # (propose an edit / decline) are only useful if it can tell them apart.
-             # Observed: on a prompt whose failures were retrieval-side it declined
-             # with "not due to this prompt", a conclusion it could not check.
-             "n_contexts": len(r.get("contexts") or []),
-             "context_sample": [c[:300] for c in (r.get("contexts") or [])[:3]]}
-            for r, s, m in pairs[:limit]]
+
+    # Skip the cases whose evidence was never retrieved.
+    #
+    # The globally worst cases are dominated by retrieval failures, and no prompt can fix
+    # those — so passing them to the proposer made it decline, correctly, three times in a
+    # row on three different prompts, and the prompt lever was never tried on the cases it
+    # could have moved. Measured on the full dev split: 5 of 24 answerable questions are
+    # retrieval failures, and they are the five lowest scores (scripts/evidence_check.py).
+    strong: List[Tuple[Dict, Dict, float]] = []
+    weak: List[Tuple[Dict, Dict, float]] = []
+    retrieval_failures = 0
+    for record, row, score in pairs:
+        evidence = [str(x) for x in (record.get("reference_contexts") or [])]
+        retrieved = [str(x) for x in (record.get("contexts") or [])]
+        coverage = text_coverage(evidence, retrieved) if evidence else 1.0
+        record["_coverage"] = coverage
+        if coverage < RETRIEVAL_FLOOR:
+            retrieval_failures += 1
+        elif coverage >= PROMPTABLE_FLOOR:
+            strong.append((record, row, score))
+        else:
+            weak.append((record, row, score))
+
+    # Strong first: cases where the answer HAD the evidence and missed it anyway, which is
+    # the only kind this prompt can be blamed for. Partial ones fill a short list.
+    kept = strong[:limit] + weak[:max(0, limit - len(strong[:limit]))]
+    if retrieval_failures:
+        print(f"skipped {retrieval_failures} case(s) whose evidence was never retrieved "
+              f"(no prompt can fix those; they are retrieval work)")
+    print(f"selected {len(strong[:limit])} case(s) where the evidence WAS retrieved "
+          f"(>= {PROMPTABLE_FLOOR:.0%}) and the answer still failed"
+          + (f", plus {len(kept) - len(strong[:limit])} partial" if len(kept) > len(strong[:limit]) else ""))
+
+    out: List[Dict] = []
+    for r, s, m in kept:
+        evidence = [str(x) for x in (r.get("reference_contexts") or [])]
+        retrieved = [str(x) for x in (r.get("contexts") or [])]
+        # Show the passages that CARRY the evidence, not the first few.
+        #
+        # Retrieval order is not relevance order once a pool has been polluted: the first
+        # passages of a bad run are the junk, and the evidence sits deeper. The proposer
+        # was shown the first three and declined a third time on "the retrieved passages
+        # are mostly irrelevant (cricket schedules, stadium chants)" — a correct reading
+        # of what it was shown and a misleading one of the run. Ranking by how much of
+        # the reference evidence each passage actually covers makes the difference
+        # between a generation-side failure (the answer missed evidence that was in front
+        # of it) and a retrieval-side one legible, which is what decides whether an edit
+        # to this prompt can help at all.
+        ranked = sorted(retrieved,
+                        key=lambda c: text_coverage(evidence, [c]) if evidence else 0.0,
+                        reverse=True)
+        out.append({"question": r["question"], "expected": r["ground_truth"],
+                    "answer": (r["answer"] or "")[:900], "score": round(m, 3),
+                    "scores": {k: s.get(k) for k in metrics},
+                    "n_contexts": len(retrieved),
+                    "evidence_coverage": round(r["_coverage"], 3) if evidence else None,
+                    # The sentences the answer should have reflected. MultiHop-RAG's answer
+                    # is often just "Yes", so without these the proposer cannot judge whether
+                    # an answer that reads reasonably actually answered the question.
+                    "evidence_needed": [e[:200] for e in evidence[:3]],
+                    "context_sample": [c[:300] for c in ranked[:3]]})
+    return out
 
 
 def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base: str) -> Dict:
@@ -160,10 +230,13 @@ def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base:
     """
     failing = "\n\n".join(
         f"[{i + 1}] question: {c['question'][:220]}\n"
-        f"    expected: {str(c['expected'])[:120]}\n"
+        f"    expected answer: {str(c['expected'])[:120]}\n"
         f"    system answer: {c['answer'][:400]}\n"
         f"    per-metric: {c['scores']}\n"
-        f"    retrieved {c.get('n_contexts', 0)} passage(s); the first ones were:\n"
+        f"    evidence the retrieved passages DO contain "
+        f"(covering {c.get('evidence_coverage') or 0:.0%} of what the question needs):\n"
+        + "\n".join(f"      · {e}" for e in c.get("evidence_needed", [])) + "\n"
+        f"    of the {c.get('n_contexts', 0)} passages retrieved, the ones carrying most of it:\n"
         + "\n".join(f"      - {ctx[:220]}" for ctx in c.get("context_sample", []))
         for i, c in enumerate(cases))
     body = {
