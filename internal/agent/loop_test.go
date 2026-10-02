@@ -256,7 +256,7 @@ func TestMediumSpecMatchesPlan(t *testing.T) {
 	if spec.ActionMaxTurns != 12 {
 		t.Fatalf("ActionMaxTurns = %d, want 12 (per-turn allowance, see Medium)", spec.ActionMaxTurns)
 	}
-	if spec.SnippetsPerQuery != 6 {
+	if spec.SnippetsPerQuery != 10 {
 		t.Fatalf("SnippetsPerQuery = %d, want 6", spec.SnippetsPerQuery)
 	}
 	if spec.UseFanout {
