@@ -85,3 +85,9 @@
 > ② 二者的作用方向都指向"更愿意回答"，叠加后对**不可答题的拒答行为**的影响大于任一单独测得的幅度 ✗。
 > 若日后要评估，应直接测**这两处合并后**的全 dev @0.2°，而不是分别测。
 | 2026-10-03 | `maxSearchQueries` → 2 | 0.6813 | 0.2959 | 否决 | measurement incomplete: answer_relevancy lost 17 sample(s) to judge failures against the baseline's 0; re-score before deciding |
+
+> **撤回（2026-10-03）**：本轮**没有任何**"两处发布的 +0.2079"这类结论 ✗ ——
+> 那份测量（`ship-baseline`）是在**生成器（Ollama）不可用**的状态下跑的 ✗：
+> 24/24 答案恰好 6000 字、每题 7 秒 = 内核退回的**摘录式草稿** ✗。
+> **两处发布改动的真实效果至今未测** ✓（待生成器恢备后重测 ✓）。
+> 详见 `docs/plan.md` §13.27。
