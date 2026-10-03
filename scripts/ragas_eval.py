@@ -466,6 +466,17 @@ def stage_score(args: argparse.Namespace) -> int:
         "metrics_requested": metric_names,
         "n_scored": len(answerable),
         "n_failed": sum(1 for r in records if r.get("error")),
+        # Whether this scorecard may be used for a DECISION at all.
+        #
+        # A run whose kernel died mid-flight still produces a full scorecard, and every
+        # derived number is an artifact of the missing answers: empty answers score 0 on
+        # answer_relevancy, empty pools make context_recall read 1.0, and a judge asked
+        # whether an empty reply refused the question tends to say yes. One such run was
+        # read as "macro -0.087, refusal 0.75 -> 0.0" before anyone noticed n_failed: 31 —
+        # every number in it was caused by 23 questions that never ran.
+        "usable": not any(r.get("error") for r in records),
+        "unusable_reason": ("one or more questions failed to run; every metric is an artifact "
+                            "of the missing answers" if any(r.get("error") for r in records) else None),
         "metrics": scores,
         "judge_nan_samples": nan_samples,
         "judge_contexts_max": args.judge_max_contexts,

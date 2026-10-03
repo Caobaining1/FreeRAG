@@ -151,6 +151,11 @@ def measurement_is_whole(candidate: Dict, baseline: Dict) -> Optional[str]:
     which is not decidable from those two numbers. The floor is deliberately loose (one
     lost sample is tolerated) and any breach refuses the decision rather than shrinking it.
     """
+    for card, side in ((candidate, "candidate"), (baseline, "baseline")):
+        if card.get("usable") is False or (card.get("n_failed") or 0) > 0:
+            return (f"measurement unusable: the {side} run had {card.get('n_failed')} question(s) "
+                    f"that failed to run ({card.get('unusable_reason') or 'see the run log'}); "
+                    f"re-run it before deciding")
     for name in METRIC_NAMES:
         before = (baseline.get("judge_nan_samples") or {}).get(name, 0)
         after = (candidate.get("judge_nan_samples") or {}).get(name, 0)
