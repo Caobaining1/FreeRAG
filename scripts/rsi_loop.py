@@ -98,9 +98,23 @@ def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
     # 17 to 19 of 24 samples came back NaN on one run at six, while the same settings on
     # another run at the same time were clean. The NaN guard refuses the decision, so this
     # costs a wasted 3h rather than a wrong verdict, but it still costs it.
-    subprocess.run([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
-                    "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
-                    "--judge-workers", "4"], cwd=REPO, env=env, capture_output=True, text=True)
+    for attempt in range(2):
+        subprocess.run([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
+                        "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
+                        "--judge-workers", "4"], cwd=REPO, env=env, capture_output=True, text=True)
+        card = scorecard(name)
+        if card is None:
+            return None
+        # One retry, because the failure it covers is transient and costs 3h to discover
+        # otherwise: a run whose judge calls fail — 17 to 19 of 24 samples came back NaN in
+        # one 27-minute window while another run at the same time was clean — is refused by
+        # the NaN guard, which is correct and wastes the whole decision. Re-judging the same
+        # answers takes ~15 minutes and usually succeeds.
+        lost = sum((card.get("judge_nan_samples") or {}).values())
+        if lost <= 2:
+            return card
+        log(f"decide: {lost} sample(s) lost to judge failures; re-judging once "
+            f"(likely a transient rate limit)")
     return scorecard(name)
 
 
