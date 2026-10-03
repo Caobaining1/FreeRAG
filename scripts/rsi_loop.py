@@ -132,7 +132,7 @@ def tree_is_clean() -> bool:
     `git add` is given these paths rather than `-A`. Checking the whole tree instead would let an
     untracked document being written elsewhere in the repo block a run that takes days.
     """
-    watched = sorted({str(spec["file"]) for spec in S.Knobs.values()}
+    watched = sorted({str(spec["file"]) for spec in S.KNobs.values()}
                      | {str(spec["file"]) for spec in P.PROMPTS.values()})
     out = subprocess.run(["git", "status", "--porcelain", "--"] + watched, cwd=REPO,
                          capture_output=True, text=True).stdout.strip()
