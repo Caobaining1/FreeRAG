@@ -244,13 +244,27 @@ def stage_index(args: argparse.Namespace) -> int:
 
 
 def generator_answers() -> bool:
-    """True when something answers on the generator's /api/version."""
+    """True when the generator answers AND holds the model the kernel will ask for.
+
+    Both halves matter, and the second one is the lesson. Checking only the server found it
+    healthy while the model directory was wrong: Ollama was serving, /api/version returned
+    200, and every chat request failed because `FREERAG_MODELS` had not been set — so the
+    kernel fell back to extractive drafts for a whole run and the numbers looked fine. A
+    reachable server with no model is not a generator.
+    """
     url = (os.environ.get("FREERAG_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
+    wanted = os.environ.get("FREERAG_MODEL") or "freerag-qwen3"
     try:
         with urllib.request.urlopen(f"{url}/api/version", timeout=5) as response:
-            return response.status == 200
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+            if response.status != 200:
+                return False
+        with urllib.request.urlopen(f"{url}/api/tags", timeout=10) as response:
+            tags = json.load(response)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
         return False
+    names = [str(m.get("name") or "") for m in (tags.get("models") or [])]
+    # Ollama names carry a tag ("freerag-qwen3:latest") while FREERAG_MODEL may not.
+    return any(n == wanted or n.split(":")[0] == wanted.split(":")[0] for n in names)
 
 
 def extractive_signature(records: Iterable[Dict[str, Any]]) -> Optional[str]:
