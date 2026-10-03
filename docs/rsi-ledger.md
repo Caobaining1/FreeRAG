@@ -84,3 +84,4 @@
 > **两点如实记录**：① 这两处**从未一起测过** ✗——各自单独测时都在不可接受的方向上；
 > ② 二者的作用方向都指向"更愿意回答"，叠加后对**不可答题的拒答行为**的影响大于任一单独测得的幅度 ✗。
 > 若日后要评估，应直接测**这两处合并后**的全 dev @0.2°，而不是分别测。
+| 2026-10-03 | `maxSearchQueries` → 2 | 0.6813 | 0.2959 | 否决 | measurement incomplete: answer_relevancy lost 17 sample(s) to judge failures against the baseline's 0; re-score before deciding |

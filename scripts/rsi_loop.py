@@ -82,15 +82,25 @@ def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
     env["FREERAG_GENERATION_TEMPERATURE"] = SHIPPED_TEMPERATURE
     if fresh or not path.exists():
         log(f"decide: running {name} on the full dev split at {SHIPPED_TEMPERATURE}")
+        # --fresh is NOT optional here. `ragas_eval.py run` resumes by default, and a
+        # decision must measure the code that is in the tree NOW: reusing a run from an
+        # earlier attempt measures an earlier candidate. Measured: a decision "ran" the
+        # full split in three minutes and then judged a stale file whose answers came from
+        # a different build, which is how a candidate that had never been run got rejected.
         subprocess.run([str(P.PY), "-u", "scripts/ragas_eval.py", "run",
                         "--split", "eval/dev.json", "--kb", "eval/data-hybrid",
-                        "--name", name], cwd=REPO, env=env, capture_output=True, text=True)
+                        "--name", name, "--fresh"], cwd=REPO, env=env,
+                       capture_output=True, text=True)
     if not path.exists():
         return None
     log(f"decide: judging {name}")
+    # Four workers, not six: the provider rate-limits, and the failure mode is silent —
+    # 17 to 19 of 24 samples came back NaN on one run at six, while the same settings on
+    # another run at the same time were clean. The NaN guard refuses the decision, so this
+    # costs a wasted 3h rather than a wrong verdict, but it still costs it.
     subprocess.run([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
                     "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
-                    "--judge-workers", "6"], cwd=REPO, env=env, capture_output=True, text=True)
+                    "--judge-workers", "4"], cwd=REPO, env=env, capture_output=True, text=True)
     return scorecard(name)
 
 
