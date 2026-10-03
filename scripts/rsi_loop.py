@@ -65,6 +65,38 @@ def log(line: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {line}", flush=True)
 
 
+# What has already been tried, across runs. Kept in a file rather than in memory so that
+# restarting the loop does not re-measure the whole knob grid, and so that a prompt's rejected
+# edits accumulate and the proposer stops offering them.
+TRIED_FILE = RUNS / "rsi-tried.json"
+
+
+def load_tried() -> Dict:
+    if TRIED_FILE.exists():
+        try:
+            return json.loads(TRIED_FILE.read_text(encoding="utf-8"))
+        except ValueError:
+            return {}
+    return {}
+
+
+def save_tried(state: Dict) -> None:
+    TRIED_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def note_knob(state: Dict, name: str, value) -> None:
+    knobs = state.setdefault("knobs", [])
+    if [name, value] not in knobs:
+        knobs.append([name, value])
+    save_tried(state)
+
+
+def note_prompt(state: Dict, name: str, edit: str, reason: str) -> None:
+    prompts = state.setdefault("prompts", {}).setdefault(name, [])
+    prompts.append({"edit": edit[:300], "reason": reason[:200]})
+    save_tried(state)
+
+
 def append_ledger(rows: List[str]) -> None:
     with LEDGER.open("a", encoding="utf-8") as sink:
         sink.write("\n".join(rows) + "\n")
@@ -202,20 +234,27 @@ def run_knob(name: str, value: int, accepts: int) -> Optional[bool]:
     return True
 
 
-def run_prompt(name: str, accepts: int) -> Optional[bool]:
+def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
     """One prompt candidate: proposed by the model, then decided on the full split."""
     path, whole, current = P.read_prompt(name)
     log(f"candidate prompt {name} ({len(current)} chars)")
     cases = P.worst_cases(6)
+    history = tried.get("prompts", {}).get(name, [])
+    avoid = [h.get("edit") or f"declined ({h.get('reason', '')})" for h in history]
+    if avoid:
+        log(f"  excluding {len(avoid)} edit(s) already measured for this prompt")
     # Same defaults as rsi_propose's own CLI, read from the same place, so the loop and the
     # hand-run path cannot drift apart.
     proposal = P.propose(name, current, cases,
                          os.environ.get("RAGAS_JUDGE_MODEL", "deepseek-v4.1-flash"),
-                         os.environ.get("RAGAS_JUDGE_BASE", "https://llm.goaichat.top/v1"))
+                         os.environ.get("RAGAS_JUDGE_BASE", "https://llm.goaichat.top/v1"),
+                         avoid=avoid)
     if proposal.get("no_edit"):
+        rationale = proposal.get("rationale", "")
         append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` | — | — | — | 无提案 | "
-                       f"{proposal.get('rationale', '')[:120]} |"])
-        log(f"proposer declined: {proposal.get('rationale')}")
+                       f"{rationale[:120]} |"])
+        note_prompt(tried, name, "", rationale)
+        log(f"proposer declined: {rationale}")
         return None
     new_prompt = proposal.get("new_prompt") or ""
     if not new_prompt or new_prompt == current or "`" in new_prompt:
@@ -233,6 +272,9 @@ def run_prompt(name: str, accepts: int) -> Optional[bool]:
     ok, reason = decide(validated or {}, full_baseline, VALIDATE_DELTA, "判决")
     append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` +{len(new_prompt) - len(current)} chars | "
                    f"{macro(full_baseline)} | {macro(validated)} | {'接受' if ok else '否决'} | {reason} |"])
+    # Recorded whether it won or lost: the next proposal has to be a different idea, and this is
+    # the only thing that says which ideas are used up.
+    note_prompt(tried, name, new_prompt, reason)
     if not ok:
         log(f"rejected {name}: {reason}")
         subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
@@ -252,6 +294,8 @@ def main() -> int:
                         help="stop early after this many acceptances (default: run the whole menu)")
     parser.add_argument("--max-candidates", type=int, default=None,
                         help="safety bound on attempts (default: the size of the declared menu)")
+    parser.add_argument("--rounds", type=int, default=5,
+                        help="prompt rounds to run after the knob grid; -1 keeps going until stopped")
     args = parser.parse_args()
 
     if not tree_is_clean():
@@ -265,19 +309,30 @@ def main() -> int:
     # pressure to the one number that must never be pressured — the acceptance rule. The menu is
     # what the loop can actually vary; running it out is an honest end state, and so is
     # "0 accepted".
-    menu_size = sum(len(spec["candidates"]) for spec in S.KNobs.values()) + len(P.PROMPTS)
-    goal = args.accepts if args.accepts is not None else menu_size
-    tried_goal = args.max_candidates if args.max_candidates is not None else menu_size
-    log(f"goal: the whole menu ({menu_size} candidate(s))"
+    menu_size = sum(len(spec["candidates"]) for spec in S.KNobs.values())
+    # Prompt rounds are the inexhaustible part of the loop: the knob grid is finite and gets used
+    # up, while a prompt can be proposed on again as long as the new idea differs from the ones
+    # already measured — which is what the tried history enforces.
+    prompt_budget = len(P.PROMPTS) * (args.rounds if args.rounds > 0 else 100)
+    goal = args.accepts if args.accepts is not None else menu_size + prompt_budget
+    tried_goal = args.max_candidates if args.max_candidates is not None else menu_size + prompt_budget
+    log(f"goal: {menu_size} knob candidate(s), then {args.rounds} prompt round(s) of {len(P.PROMPTS)}"
         + (f", stopping early after {args.accepts} acceptance(s)" if args.accepts is not None else ""))
 
+    tried_state = load_tried()
+    done_knobs = {tuple(pair) for pair in tried_state.get("knobs", [])}
+    if done_knobs:
+        log(f"skipping {len(done_knobs)} knob candidate(s) already tried in an earlier run")
     accepted = 0
     tried = 0
     for name, spec in S.KNobs.items():
         for value in spec["candidates"]:
             if accepted >= goal or tried >= tried_goal:
                 break
+            if (name, value) in done_knobs:
+                continue
             tried += 1
+            note_knob(tried_state, name, value)
             try:
                 if run_knob(name, value, accepted) is True:
                     accepted += 1
@@ -289,18 +344,24 @@ def main() -> int:
         if accepted >= goal or tried >= tried_goal:
             break
 
-    for name in P.PROMPTS:
+    round_index = 0
+    while args.rounds < 0 or round_index < args.rounds:
         if accepted >= goal or tried >= tried_goal:
             break
-        tried += 1
-        try:
-            if run_prompt(name, accepted) is True:
-                accepted += 1
-        except Exception as exc:
-            append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` | 异常 | — | — | 跳过 | "
-                           f"{type(exc).__name__}: {str(exc)[:100]} |"])
-            log(f"candidate {name} raised: {exc!r}")
-            subprocess.run(["git", "checkout", "--", "."], cwd=REPO, capture_output=True)
+        round_index += 1
+        log(f"prompt round {round_index}" + ("" if args.rounds < 0 else f" of {args.rounds}"))
+        for name in P.PROMPTS:
+            if accepted >= goal or tried >= tried_goal:
+                break
+            tried += 1
+            try:
+                if run_prompt(name, accepted, tried_state) is True:
+                    accepted += 1
+            except Exception as exc:
+                append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` | 异常 | — | — | 跳过 | "
+                               f"{type(exc).__name__}: {str(exc)[:100]} |"])
+                log(f"candidate {name} raised: {exc!r}")
+                subprocess.run(["git", "checkout", "--", "."], cwd=REPO, capture_output=True)
 
     log(f"stopping: {accepted} accepted, {tried} candidate(s) tried")
     return 0

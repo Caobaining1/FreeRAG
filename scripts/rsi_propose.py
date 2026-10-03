@@ -225,7 +225,8 @@ def worst_cases(limit: int) -> List[Dict]:
     return out
 
 
-def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base: str) -> Dict:
+def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base: str,
+            avoid: Optional[List[str]] = None) -> Dict:
     """Ask the proposer for one edit. Plain HTTP, no SDK.
 
     Deliberately not langchain: this needs one chat completion, and importing an
@@ -235,6 +236,16 @@ def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base:
     Also deliberately NOT the generator (`§13.5`): a model editing another model's
     prompt and then grading its output is the self-preference loop the plan rules out.
     """
+    # Edits already measured as not-better for this prompt. Without this the loop cannot run
+    # continuously: the proposer is near-deterministic at temperature 0, so the same prompt and
+    # the same cases produce the same edit, which the same measurement rejects again — a loop
+    # that looks busy and permanently proposes one thing.
+    avoid_block = ""
+    if avoid:
+        avoid_block = ("\n\nAlready proposed for this prompt and measured as not better — do NOT "
+                       "repeat these, and do not just reword them:\n"
+                       + "\n".join(f"  - {item}" for item in avoid[-8:]))
+
     failing = "\n\n".join(
         f"[{i + 1}] question: {c['question'][:220]}\n"
         f"    expected answer: {str(c['expected'])[:120]}\n"
@@ -263,8 +274,8 @@ def propose(prompt_name: str, current: str, cases: List[Dict], model: str, base:
             {"role": "system", "content": PROPOSER_SYSTEM},
             {"role": "user", "content":
                 f"PROMPT NAME: {prompt_name}\n\nCURRENT PROMPT:\n\"\"\"\n{current}\n\"\"\"\n\n"
-                f"CASES WHERE THE SYSTEM SCORED WORST ({len(cases)} of them):\n{failing}\n\n"
-                f"Propose the smallest edit."},
+                f"CASES WHERE THE SYSTEM SCORED WORST ({len(cases)} of them):\n{failing}"
+                f"{avoid_block}\n\nPropose the smallest edit."},
         ],
     }
     request = urllib.request.Request(
