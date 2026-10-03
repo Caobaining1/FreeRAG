@@ -28,12 +28,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -240,6 +243,36 @@ def stage_index(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def generator_answers() -> bool:
+    """True when something answers on the generator's /api/version."""
+    url = (os.environ.get("FREERAG_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{url}/api/version", timeout=5) as response:
+            return response.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        return False
+
+
+def extractive_signature(records: Iterable[Dict[str, Any]]) -> Optional[str]:
+    """Why this run looks like the kernel's no-generator fallback, or None.
+
+    With no generator the kernel answers from the evidence it retrieved, in one capped block
+    per question — so answers share an exact length, at the cap, and the fidelity metrics look
+    excellent for the obvious reason: the answer IS the evidence. That is a shape, not a
+    threshold, which is why it is detected by repeated lengths rather than by score.
+    """
+    lengths = [len(r.get("answer") or "") for r in records
+               if r.get("type") != "null_query" and not r.get("error")]
+    if len(lengths) < 4:
+        return None
+    length, count = collections.Counter(lengths).most_common(1)[0]
+    if length >= 3000 and count >= len(lengths) / 2:
+        return (f"{count} of {len(lengths)} answers are exactly {length} characters — the "
+                f"extractive draft the kernel returns without a generator; the fidelity "
+                f"metrics are high because the answer is the retrieved text")
+    return None
+
+
 def stage_run(args: argparse.Namespace) -> int:
     rows = json.loads(Path(args.split).read_text(encoding="utf-8"))
     kb_file = Path(args.kb) / "kb_id.txt"
@@ -248,6 +281,19 @@ def stage_run(args: argparse.Namespace) -> int:
     run_dir = Path(args.out)
     run_dir.mkdir(parents=True, exist_ok=True)
     target = run_dir / f"{args.name}.jsonl"
+
+    # A run without a generator is worse than a run that fails outright.
+    #
+    # The kernel degrades to extractive drafts — it echoes a capped block of the retrieved
+    # evidence — so every question still returns a long answer and every metric still comes
+    # back with a plausible number. Measured: 24 of 24 answers at exactly the draft cap with
+    # 7-second questions, and a macro that appeared to jump 0.21 for two changes that had
+    # never been tested, because Ollama had been stopped during unrelated work and never
+    # restarted. Checking first costs one HTTP request.
+    if not generator_answers():
+        print("refusing to run: the generator does not answer /api/version, so this run would "
+              "fill up with extractive drafts that read like answers", file=sys.stderr)
+        return 1
 
     # Resume: keep the questions already answered and skip them. Measured need —
     # memory pressure took one question from ~140 s to 507 s, and the only lever
@@ -474,9 +520,11 @@ def stage_score(args: argparse.Namespace) -> int:
         # whether an empty reply refused the question tends to say yes. One such run was
         # read as "macro -0.087, refusal 0.75 -> 0.0" before anyone noticed n_failed: 31 —
         # every number in it was caused by 23 questions that never ran.
-        "usable": not any(r.get("error") for r in records),
-        "unusable_reason": ("one or more questions failed to run; every metric is an artifact "
-                            "of the missing answers" if any(r.get("error") for r in records) else None),
+        "usable": not any(r.get("error") for r in records) and not extractive_signature(records),
+        "unusable_reason": (("one or more questions failed to run; every metric is an artifact "
+                             "of the missing answers") if any(r.get("error") for r in records)
+                            else extractive_signature(records)),
+        "generator_reachable": generator_answers(),
         "metrics": scores,
         "judge_nan_samples": nan_samples,
         "judge_contexts_max": args.judge_max_contexts,
