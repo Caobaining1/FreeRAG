@@ -125,7 +125,16 @@ def commit(message: str, paths: List[str]) -> None:
 
 
 def tree_is_clean() -> bool:
-    out = subprocess.run(["git", "status", "--porcelain"], cwd=REPO,
+    """Do the files this loop may rewrite match their committed state?
+
+    Only those files are checked. What has to be protected is that a revert is EXACT, and that
+    only concerns the files the loop edits — which are also the only ones it commits, since
+    `git add` is given these paths rather than `-A`. Checking the whole tree instead would let an
+    untracked document being written elsewhere in the repo block a run that takes days.
+    """
+    watched = sorted({str(spec["file"]) for spec in S.Knobs.values()}
+                     | {str(spec["file"]) for spec in P.PROMPTS.values()})
+    out = subprocess.run(["git", "status", "--porcelain", "--"] + watched, cwd=REPO,
                          capture_output=True, text=True).stdout.strip()
     return out == ""
 
@@ -241,19 +250,34 @@ def run_prompt(name: str, accepts: int) -> Optional[bool]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--accepts", type=int, default=10)
-    parser.add_argument("--max-candidates", type=int, default=60)
+    parser.add_argument("--accepts", type=int, default=None,
+                        help="stop early after this many acceptances (default: run the whole menu)")
+    parser.add_argument("--max-candidates", type=int, default=None,
+                        help="safety bound on attempts (default: the size of the declared menu)")
     args = parser.parse_args()
 
     if not tree_is_clean():
         log("refusing to start: the working tree is not clean, so a revert would not be exact")
         return 1
 
+    # The goal is the declared menu, not a target number of acceptances.
+    #
+    # A target count is the wrong shape for an unattended run twice over: it keeps the loop
+    # looking for material after the menu is exhausted, where there is none, and it applies
+    # pressure to the one number that must never be pressured — the acceptance rule. The menu is
+    # what the loop can actually vary; running it out is an honest end state, and so is
+    # "0 accepted".
+    menu_size = sum(len(spec["candidates"]) for spec in S.KNobs.values()) + len(P.PROMPTS)
+    goal = args.accepts if args.accepts is not None else menu_size
+    tried_goal = args.max_candidates if args.max_candidates is not None else menu_size
+    log(f"goal: the whole menu ({menu_size} candidate(s))"
+        + (f", stopping early after {args.accepts} acceptance(s)" if args.accepts is not None else ""))
+
     accepted = 0
     tried = 0
     for name, spec in S.KNobs.items():
         for value in spec["candidates"]:
-            if accepted >= args.accepts or tried >= args.max_candidates:
+            if accepted >= goal or tried >= tried_goal:
                 break
             tried += 1
             try:
@@ -264,11 +288,11 @@ def main() -> int:
                                f"{type(exc).__name__}: {str(exc)[:100]} |"])
                 log(f"candidate {name}={value} raised: {exc!r}")
                 subprocess.run(["git", "checkout", "--", "."], cwd=REPO, capture_output=True)
-        if accepted >= args.accepts or tried >= args.max_candidates:
+        if accepted >= goal or tried >= tried_goal:
             break
 
     for name in P.PROMPTS:
-        if accepted >= args.accepts or tried >= args.max_candidates:
+        if accepted >= goal or tried >= tried_goal:
             break
         tried += 1
         try:
