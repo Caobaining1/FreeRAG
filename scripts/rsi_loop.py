@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""Run the improvement loop unattended until N changes are accepted. docs/plan.md §13.22.
+"""Run the improvement loop unattended over the whole declared menu. docs/plan.md §13.25.
 
-Two stages per candidate, because §13.21 showed that one stage is not enough:
+One stage per candidate: the FULL dev split (32 questions, 8 of them unanswerable) at the
+SHIPPED temperature 0.2, about 3h. That is the decision, and it is the only place the refusal
+guard can be measured at all.
 
-  screen   dev-loop (10 questions) at temperature 0, ~45 min. Cheap, and it only decides
-           whether the candidate is worth the expensive stage. A screen pass is NOT an
-           acceptance: the one change this loop accepted on a screen alone was rolled back
-           after validation (-0.057 macro, and the refusal rate fell with it).
-  decide   the FULL dev split (32 questions, 8 of them unanswerable) at the SHIPPED
-           temperature 0.2, ~3h. This is the decision, and it is also the only place the
-           refusal guard can be measured at all.
+There used to be a cheap screen in front of it — the 10-question dev-loop at temperature 0,
+45 min — and it was removed because it did not predict anything. Measured on the first seven
+candidates: maxSearchQueries 3->4 scored +0.0867 on the screen and +0.0019 on the full split,
+and SnippetsPerQuery 6->10 scored +0.060 then -0.057. A 0.085-0.117 swing on changes whose
+real effect is under 0.05. The cause was mine: the screen ran at temperature 0 and the
+decision at 0.2, which §13.18 had already recorded as two different distributions. A gate that
+runs under different conditions than the decision it gates cannot predict it, and this one cost
+45 minutes per candidate to be wrong in both directions — passing candidates that were then
+rejected, and stopping ones that were never measured.
 
 State rules, which is where an unattended loop gets dangerous:
   - the tree always equals the accepted state: a rejected candidate is reverted before the
     next one is applied, and an accepted one is committed at once;
-  - the two comparison scorecards always describe the accepted state, and are rewritten
-    from the candidate's own measurements when it is accepted;
+  - the comparison scorecard always describes the accepted state, and is rewritten from an
+    accepted candidate's own measurement;
   - every outcome goes to docs/rsi-ledger.md with the numbers and the reason, including the
     ones that failed to run.
 
 Usage:
-    python3 scripts/rsi_loop.py --accepts 10
+    python3 scripts/rsi_loop.py                  # the whole menu
+    python3 scripts/rsi_loop.py --accepts 3       # stop early
 """
 from __future__ import annotations
 
@@ -44,18 +49,15 @@ REPO = HERE.parent
 RUNS = REPO / "eval" / "runs"
 LEDGER = REPO / "docs" / "rsi-ledger.md"
 
-# Screen stage: the dev-loop comparison point (temperature 0) and its threshold. The
-# measured band there is 0.0271, so 0.05 is about two bands.
-SCREEN_DELTA = 0.05
-
-# Decide stage: the full-dev comparison point (temperature 0.2) and its threshold. Its band
-# has NOT been measured (a second full run costs 3h), so this is deliberately conservative:
-# a candidate has to beat the accepted state by more than the dev-loop band moved under
-# validation (-0.057) before it is believed.
+# The decision threshold on the full dev split at the shipped temperature. Its own band has
+# not been measured — a second full run costs 3h — so this is deliberately conservative: a
+# candidate has to beat the accepted state by more than the screen's error turned out to be
+# before it is believed. Worth revisiting with two full-dev runs of identical code.
 VALIDATE_DELTA = 0.05
 
-# The temperature the product ships with. Measurements for a decision run at this value;
-# screens run at 0 (scripts/ragas_eval.py sets that for every kernel it starts).
+# The temperature the product ships with. The decision runs at this value; scripts/ragas_eval.py
+# sets 0 for kernels it starts, which is right for measurement and wrong for a DECISION, since it
+# is a different distribution than the one users get (see the module docstring).
 SHIPPED_TEMPERATURE = "0.2"
 
 
@@ -154,46 +156,30 @@ def run_knob(name: str, value: int, accepts: int) -> Optional[bool]:
         S.restore()
         log(f"rebuild failed, reverted: {exc}")
         return None
-    screen = S.measure(f"screen-{name}-{value}")
-    if screen is None:
-        S.restore()
-        return None
-    ok, reason = decide(screen, S.read_scorecard(S.BASELINE_SCORECARD) or {}, SCREEN_DELTA, "筛选")
-    append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` → {value} | 筛选 | "
-                   f"{macro(S.read_scorecard(S.BASELINE_SCORECARD))} | {macro(screen)} | "
-                   f"{'过' if ok else '止'} | {reason} |"])
+    candidate = measure_full_dev(f"validate-{name}-{value}", fresh=True)
+    baseline = S.read_scorecard(RUNS / "baseline.scorecard.json") or {}
+    ok, reason = decide(candidate or {}, baseline, VALIDATE_DELTA, "判决")
+    if candidate is None:
+        ok, reason = False, "判决运行未完成"
+    append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` → {value} | "
+                   f"{macro(baseline)} | {macro(candidate)} | "
+                   f"{'接受' if ok else '否决'} | {reason} |"])
     if not ok:
-        log(f"screen rejected {name}={value}: {reason}")
+        log(f"rejected {name}={value}: {reason}")
         S.restore()
         S.rebuild()
         return False
-    log(f"screen passed {name}={value}: {reason} — validating")
-    validated = measure_full_dev(f"validate-{name}-{value}", fresh=True)
-    full_baseline = S.read_scorecard(RUNS / "baseline.scorecard.json") or {}
-    ok2, reason2 = decide(validated or {}, full_baseline, VALIDATE_DELTA, "判决")
-    if validated is None:
-        ok2, reason2 = False, "判决运行未完成"
-    append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` → {value} | 判决 | "
-                   f"{macro(full_baseline)} | {macro(validated)} | "
-                   f"{'接受' if ok2 else '否决'} | {reason2} |"])
-    if not ok2:
-        log(f"decide rejected {name}={value}: {reason2}")
-        S.restore()
-        S.rebuild()
-        return False
-    # Accepted: the files stay changed, and the comparison points become this state.
+    # Accepted: the files stay changed, and the comparison point becomes this state.
     import shutil
-    shutil.copy(RUNS / f"screen-{name}-{value}.scorecard.json", S.BASELINE_SCORECARD)
     shutil.copy(RUNS / f"validate-{name}-{value}.scorecard.json", RUNS / "baseline.scorecard.json")
-    commit(f"Accept {name} {spec['current']} -> {value} (screen + full-dev validation)\n\n"
-           f"screen {reason}\nfull dev {reason2}\n", [str(path.relative_to(REPO)),
-                                                     "docs/rsi-ledger.md"])
+    commit(f"Accept {name} {spec['current']} -> {value} (full dev at the shipped temperature)\n\n"
+           f"{reason}\n", [str(path.relative_to(REPO)), "docs/rsi-ledger.md"])
     log(f"ACCEPTED {name}={value} ({accepts + 1})")
     return True
 
 
 def run_prompt(name: str, accepts: int) -> Optional[bool]:
-    """One prompt candidate, proposed by the model and then screened and validated."""
+    """One prompt candidate: proposed by the model, then decided on the full split."""
     path, whole, current = P.read_prompt(name)
     log(f"candidate prompt {name} ({len(current)} chars)")
     cases = P.worst_cases(6)
@@ -218,32 +204,20 @@ def run_prompt(name: str, accepts: int) -> Optional[bool]:
         subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
         log(f"rebuild failed, reverted: {exc}")
         return None
-    screen = S.measure(f"screen-{name}")
-    base = S.read_scorecard(S.BASELINE_SCORECARD) or {}
-    ok, reason = decide(screen or {}, base, SCREEN_DELTA, "筛选") if screen else (False, "筛选未完成")
-    append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` +{len(new_prompt) - len(current)} chars | 筛选 | "
-                   f"{macro(base)} | {macro(screen)} | {'过' if ok else '止'} | {reason} |"])
-    if not ok:
-        log(f"screen rejected {name}: {reason}")
-        subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
-        S.rebuild()
-        return False
     validated = measure_full_dev(f"validate-{name}", fresh=True)
     full_baseline = S.read_scorecard(RUNS / "baseline.scorecard.json") or {}
-    ok2, reason2 = decide(validated or {}, full_baseline, VALIDATE_DELTA, "判决")
-    append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` +{len(new_prompt) - len(current)} chars | 判决 | "
-                   f"{macro(full_baseline)} | {macro(validated)} | {'接受' if ok2 else '否决'} | {reason2} |"])
-    if not ok2:
-        log(f"decide rejected {name}: {reason2}")
+    ok, reason = decide(validated or {}, full_baseline, VALIDATE_DELTA, "判决")
+    append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` +{len(new_prompt) - len(current)} chars | "
+                   f"{macro(full_baseline)} | {macro(validated)} | {'接受' if ok else '否决'} | {reason} |"])
+    if not ok:
+        log(f"rejected {name}: {reason}")
         subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
         S.rebuild()
         return False
     import shutil
-    shutil.copy(RUNS / f"screen-{name}.scorecard.json", S.BASELINE_SCORECARD)
     shutil.copy(RUNS / f"validate-{name}.scorecard.json", RUNS / "baseline.scorecard.json")
-    commit(f"Accept a {name} edit (+{len(new_prompt) - len(current)} chars)\n\n"
-           f"screen {reason}\nfull dev {reason2}\n", [str(path.relative_to(REPO)),
-                                                     "docs/rsi-ledger.md"])
+    commit(f"Accept a {name} edit (+{len(new_prompt) - len(current)} chars)\n\n{reason}\n",
+           [str(path.relative_to(REPO)), "docs/rsi-ledger.md"])
     log(f"ACCEPTED {name} ({accepts + 1})")
     return True
 
