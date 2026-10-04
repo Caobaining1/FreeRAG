@@ -56,6 +56,10 @@ LEDGER = REPO / "docs" / "rsi-ledger.md"
 # before it is believed. Worth revisiting with two full-dev runs of identical code.
 VALIDATE_DELTA = 0.05
 
+# A hard stop for the score stage. Normal is ~40 minutes; one run was still going after 4.5 hours
+# with 26 seconds of CPU used, i.e. blocked on a stalled request that nothing would have ended.
+SCORE_TIMEOUT_S = 5400
+
 # The temperature the product ships with. The decision runs at this value; scripts/ragas_eval.py
 # sets 0 for kernels it starts, which is right for measurement and wrong for a DECISION, since it
 # is a different distribution than the one users get (see the module docstring).
@@ -141,9 +145,19 @@ def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
     # another run at the same time were clean. The NaN guard refuses the decision, so this
     # costs a wasted 3h rather than a wrong verdict, but it still costs it.
     for attempt in range(2):
-        subprocess.run([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
-                        "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
-                        "--judge-workers", "4"], cwd=REPO, env=env, capture_output=True, text=True)
+        # Output to a file, not captured: the score stage can sit for hours on a stalled call,
+        # and with capture_output that is indistinguishable from work. One candidate spent 4.5
+        # hours of wall clock and 26 seconds of CPU before anyone could see it was stuck.
+        # The timeout turns that into a failed score, which the retry and the guards already handle.
+        score_log = RUNS / f"{name}.score.log"
+        try:
+            with score_log.open("w", encoding="utf-8") as sink:
+                subprocess.run([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
+                                "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
+                                "--judge-workers", "4"], cwd=REPO, env=env, stdout=sink,
+                               stderr=subprocess.STDOUT, timeout=SCORE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            log(f"decide: scoring timed out after {SCORE_TIMEOUT_S // 60} min; see {score_log.name}")
         card = scorecard(name)
         if card is None:
             return None
