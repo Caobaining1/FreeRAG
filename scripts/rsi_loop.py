@@ -143,7 +143,10 @@ def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
         # the NaN guard, which is correct and wastes the whole decision. Re-judging the same
         # answers takes ~15 minutes and usually succeeds.
         lost = sum((card.get("judge_nan_samples") or {}).values())
-        if lost <= 2:
+        # 1, not 2: the guard refuses when a metric loses more than max(baseline,1) samples, so
+        # tolerating 2 here would spend the re-judge and then be refused anyway — which is what
+        # happened to enumMaxRounds.
+        if lost <= 1:
             return card
         log(f"decide: {lost} sample(s) lost to judge failures; re-judging once "
             f"(likely a transient rate limit)")
@@ -204,6 +207,17 @@ def run_knob(name: str, value: int, accepts: int) -> Optional[bool]:
         return None
     spec = S.KNobs[name]
     log(f"candidate knob {name} {spec['current']} -> {value}")
+    # A previous run can die between applying a candidate and reverting it. One did, and the
+    # leftover value then reached a commit through an unrelated `git add -A` — which is how
+    # enumMaxRounds was briefly 3 in HEAD while its declaration said 2. Restoring the file before
+    # applying makes "the tree equals the accepted state" true at the start of every candidate,
+    # not only at startup.
+    target = str(Path(spec["file"]))
+    if subprocess.run(["git", "status", "--porcelain", "--", target], cwd=REPO,
+                      capture_output=True, text=True).stdout.strip():
+        log(f"  {target} had uncommitted changes; restoring to HEAD first")
+        subprocess.run(["git", "checkout", "--", target], cwd=REPO, capture_output=True)
+        S.rebuild()
     S._TOUCHED.clear()
     path, original, _ = S.apply_knob(name, value)
     try:

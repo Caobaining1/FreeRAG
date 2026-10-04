@@ -50,7 +50,7 @@ const maxEnumSlots = 4
 
 // enumMaxRounds is the round budget an enumeration is bounded to, from RAGFlow's
 // `CoverageOf(...).Ok() && rounds > 2 → 2` (agentic_rag_graph.go:1642).
-const enumMaxRounds = 3
+const enumMaxRounds = 2
 
 // Slot is one declared thing the question wants.
 //
