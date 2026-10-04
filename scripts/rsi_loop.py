@@ -329,7 +329,17 @@ def main() -> int:
         for value in spec["candidates"]:
             if accepted >= goal or tried >= tried_goal:
                 break
-            if (name, value) in done_knobs:
+            # Re-read per candidate rather than once at startup, so a decision to skip the rest
+            # of the grid takes effect at the next candidate instead of needing a restart. The
+            # `skipped` list is separate from `knobs` on purpose: "we chose not to try it" and
+            # "we tried it" are different facts, and a ledger that conflates them is worse than
+            # one that records neither.
+            fresh = load_tried()
+            skip_now = {tuple(pair) for pair in (fresh.get("knobs") or [])} | \
+                {tuple(pair) for pair in (fresh.get("skipped") or [])}
+            if (name, value) in skip_now:
+                if [name, value] in (fresh.get("skipped") or []):
+                    log(f"skipping {name}={value}: marked skipped by decision")
                 continue
             tried += 1
             note_knob(tried_state, name, value)
