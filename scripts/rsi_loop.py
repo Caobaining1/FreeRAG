@@ -278,7 +278,18 @@ def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
     log(f"candidate prompt {name} ({len(current)} chars)")
     cases = P.worst_cases(6)
     history = tried.get("prompts", {}).get(name, [])
-    avoid = [h.get("edit") or f"declined ({h.get('reason', '')})" for h in history]
+    # Each entry carries the edit AND what measuring it produced.
+    #
+    # The edit alone only says "do not repeat this sentence". The outcome says whether the
+    # direction was close (+0.016, not enough) or wrong in a specific way (recall up,
+    # relevancy down) — which is the difference between a loop that avoids a phrase and one
+    # that learns a direction is exhausted. Declines are already informative (they carry a
+    # diagnosis), so they keep their own form.
+    avoid = []
+    for entry in history:
+        outcome = (entry.get("reason") or "").strip()
+        text = entry.get("edit") or "(declined)"
+        avoid.append(f"{text}  [measured: {outcome[:160]}]" if outcome else text)
     if avoid:
         log(f"  excluding {len(avoid)} edit(s) already measured for this prompt")
     # Same defaults as rsi_propose's own CLI, read from the same place, so the loop and the
