@@ -110,7 +110,9 @@ KNobs: Dict[str, Dict[str, object]] = {
     # this knob must update that expectation too, which the build step will not
     # catch on its own.
     "SnippetsPerQuery": {
-        "file": "internal/agent/loop.go", "current": 6,
+        # 10 since the change shipped (see docs/rsi-ledger.md 2026-10-03); the candidate
+        # values below are therefore DECREASES from the shipped value, not increases.
+        "file": "internal/agent/loop.go", "current": 10,
         "pattern": r"SnippetsPerQuery:\s*(\d+)", "candidates": [4, 8],
         # TestMediumSpecMatchesPlan pins the shipped spec, and its job is to catch
         # accidental drift — not to forbid a measured change, which is what this loop
