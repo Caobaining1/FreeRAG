@@ -298,6 +298,13 @@ def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
     if not new_prompt or new_prompt == current or "`" in new_prompt:
         log("proposal unusable")
         return None
+    # Written BEFORE it is applied, for the same reason rsi_propose does it: a candidate costs
+    # about 2.5 hours, and an interruption must not lose what was being measured. One did — the
+    # loop was stopped mid-measurement and the edit's text went with it, so the record could not
+    # say what had been tried and the next proposal could repeat it.
+    pending = RUNS / f"rsi-{name}.pending.json"
+    pending.write_text(json.dumps({"edit": new_prompt, "started": time.time()},
+                                  ensure_ascii=False, indent=2), encoding="utf-8")
     path.write_text(whole.replace(f"`{current}`", f"`{new_prompt}`", 1), encoding="utf-8")
     try:
         S.rebuild()
@@ -313,6 +320,7 @@ def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
     # Recorded whether it won or lost: the next proposal has to be a different idea, and this is
     # the only thing that says which ideas are used up.
     note_prompt(tried, name, new_prompt, reason)
+    pending.unlink(missing_ok=True)
     if not ok:
         log(f"rejected {name}: {reason}")
         subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)

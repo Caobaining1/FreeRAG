@@ -94,3 +94,7 @@
 | 2026-10-04 | `maxSearchQueries` → 2 | 0.5245 | 0.4892 | 否决 | 判决: 提升 -0.0353 未超过阈值 0.050 |
 | 2026-10-04 | `maxSearchQueries` → 4 | 0.5245 | 0.4366 | 否决 | 判决: 提升 -0.0879 未超过阈值 0.050 |
 | 2026-10-04 | `maxSearchQueries` → 5 | 0.5245 | 0.5021 | 否决 | 判决: 提升 -0.0224 未超过阈值 0.050 |
+| 2026-10-04 | `enumMaxRounds` → 3 | 0.5245 | 0.466 | 否决 | measurement incomplete: context_precision lost 2 sample(s) to judge failures against the baseline's 1; re-score before deciding |
+| 2026-10-04 | `queryRewriteSystemPrompt` | 判决 | 0.5245 | 0.5402 | 否决 | 判决: 提升 +0.0157 未超过阈值 0.050 |
+
+> **备注**：该候选的提案原文未留存 ✗（驱动当时还没实现「测量前落盘」，我中途停了它 ✗）。判决数值本身有效 ✓（usable=True、NaN 在守卫容忍内 ✓，判分是卡死后重判的 ✓）。驱动现已改为测量前落盘 ✓，且中断后会留下 pending 记录 ✓。
