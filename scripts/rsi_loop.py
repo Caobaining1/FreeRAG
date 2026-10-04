@@ -65,6 +65,21 @@ SCORE_TIMEOUT_S = 5400
 # is a different distribution than the one users get (see the module docstring).
 SHIPPED_TEMPERATURE = "0.2"
 
+# The screen runs at the MEASUREMENT temperature, because that is the only condition whose
+# run-to-run band has actually been measured (0.0271 over dev-loop, §13.18).
+MEASURE_TEMPERATURE = "0"
+
+# The screen's split, and how far above its baseline a candidate must land to earn the full
+# split. The screen's job is to drop candidates that lose by more than the noise can explain,
+# not to rank the survivors — ranking them is what the decision measurement is for.
+SCREEN_SPLIT = "eval/dev-loop.json"
+SCREEN_DELTA = 0.05
+
+# The code in the tree, measured on the screen's split at the screen's temperature. Rebuilt
+# whenever HEAD moves (i.e. after every acceptance), because a screen against a baseline
+# measured on other code is the §13.16 mistake wearing a different costume.
+SCREEN_BASELINE = RUNS / "devloop-current.scorecard.json"
+
 
 def log(line: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {line}", flush=True)
@@ -121,25 +136,30 @@ def scorecard(name: str) -> Optional[Dict]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
-    """The deciding measurement: the full split at the shipped temperature."""
+def measure(name: str, split: str, temperature: str, fresh: bool) -> Optional[Dict]:
+    """Run a candidate on `split` at `temperature`, then judge it.
+
+    One body for both required measurements, because they differ only in which split and
+    which temperature: the decision needs the full split at the shipped temperature (the
+    distribution users get), the screen needs dev-loop at 0 (where the band is known).
+    """
     path = RUNS / f"{name}.jsonl"
     env = dict(os.environ)
-    env["FREERAG_GENERATION_TEMPERATURE"] = SHIPPED_TEMPERATURE
+    env["FREERAG_GENERATION_TEMPERATURE"] = temperature
     if fresh or not path.exists():
-        log(f"decide: running {name} on the full dev split at {SHIPPED_TEMPERATURE}")
+        log(f"measure: running {name} on {split} at {temperature}")
         # --fresh is NOT optional here. `ragas_eval.py run` resumes by default, and a
         # decision must measure the code that is in the tree NOW: reusing a run from an
         # earlier attempt measures an earlier candidate. Measured: a decision "ran" the
         # full split in three minutes and then judged a stale file whose answers came from
         # a different build, which is how a candidate that had never been run got rejected.
         subprocess.run([str(P.PY), "-u", "scripts/ragas_eval.py", "run",
-                        "--split", "eval/dev.json", "--kb", "eval/data-hybrid",
+                        "--split", split, "--kb", "eval/data-hybrid",
                         "--name", name, "--fresh"], cwd=REPO, env=env,
                        capture_output=True, text=True)
     if not path.exists():
         return None
-    log(f"decide: judging {name}")
+    log(f"measure: judging {name}")
     # Four workers, not six: the provider rate-limits, and the failure mode is silent —
     # 17 to 19 of 24 samples came back NaN on one run at six, while the same settings on
     # another run at the same time were clean. The NaN guard refuses the decision, so this
@@ -172,9 +192,54 @@ def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
         # happened to enumMaxRounds.
         if lost <= 1:
             return card
-        log(f"decide: {lost} sample(s) lost to judge failures; re-judging once "
+        log(f"measure: {lost} sample(s) lost to judge failures; re-judging once "
             f"(likely a transient rate limit)")
     return scorecard(name)
+
+
+def measure_full_dev(name: str, fresh: bool) -> Optional[Dict]:
+    """The deciding measurement: the full split at the shipped temperature."""
+    return measure(name, "eval/dev.json", SHIPPED_TEMPERATURE, fresh)
+
+
+def measure_dev_loop(name: str, fresh: bool) -> Optional[Dict]:
+    """The screen: dev-loop at the measurement temperature."""
+    return measure(name, SCREEN_SPLIT, MEASURE_TEMPERATURE, fresh)
+
+
+def head_hash() -> str:
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True,
+                              text=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+def ensure_screen_baseline() -> Optional[Dict]:
+    """The code in the tree, measured on the screen's split at the screen's temperature.
+
+    Measured rather than derived: the stored dev-loop scorecard was taken on other code
+    (`SnippetsPerQuery=6`, before the grep fix), and comparing a candidate against a baseline
+    of a different program is exactly the error §13.16 recorded. It is refreshed when HEAD
+    moves, which happens on every acceptance — the one event that changes what "the code"
+    means.
+
+    Costs one dev-loop measurement (~40 minutes, once per accepted change, against the
+    ~3 hours the full-split decision costs per candidate).
+    """
+    stamp_file = RUNS / "devloop-current.stamp"
+    stamp = head_hash()
+    if SCREEN_BASELINE.exists() and stamp_file.exists():
+        if stamp_file.read_text(encoding="utf-8").strip() == stamp:
+            card = S.read_scorecard(SCREEN_BASELINE)
+            if card:
+                return card
+    log(f"screen baseline: measuring the tree at {stamp[:8] or '?'} on {SCREEN_SPLIT} "
+        f"at {MEASURE_TEMPERATURE} (once per accepted change)")
+    card = measure_dev_loop("devloop-current", fresh=True)
+    if card:
+        stamp_file.write_text(stamp, encoding="utf-8")
+    return card
 
 
 def macro(card: Optional[Dict]) -> Optional[float]:
@@ -323,6 +388,33 @@ def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
         subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
         log(f"rebuild failed, reverted: {exc}")
         return None
+    # Screen before deciding.
+    #
+    # Every prompt candidate used to go straight to the full split, ~3 hours each. At one
+    # proposal per prompt per round that is the whole budget spent on ideas that lose for
+    # reasons ten questions can see, and the hit rate so far is 0 from 8.
+    #
+    # The screen decides nothing: the acceptance rule, its guards and its threshold are
+    # unchanged, and a survivor is still decided on the full split at the shipped
+    # temperature. §13.16's rule was never "do not look at ten questions" — it was "do not
+    # decide on them".
+    screen_baseline = ensure_screen_baseline() or {}
+    screened = measure_dev_loop(f"screen-{name}", fresh=True)
+    screen_ok, screen_reason = decide(screened or {}, screen_baseline, SCREEN_DELTA, "筛选")
+    if not screen_ok:
+        # Recorded as screened, not as a verdict: "lost on the full split" and "did not earn
+        # the full split" are different facts, and the ledger has to be able to tell them
+        # apart later.
+        note_prompt(tried, name, new_prompt, f"筛除（未上全 dev）: {screen_reason}")
+        append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` +{len(new_prompt) - len(current)} chars | "
+                       f"{macro(screen_baseline)} | {macro(screened)} | 筛除 | {screen_reason} |"])
+        log(f"screened out {name}: {screen_reason}")
+        pending.unlink(missing_ok=True)
+        subprocess.run(["git", "checkout", "--", str(path.relative_to(REPO))], cwd=REPO)
+        S.rebuild()
+        return False
+    log(f"screen passed ({macro(screened)} vs {macro(screen_baseline)}): measuring the full split")
+
     validated = measure_full_dev(f"validate-{name}", fresh=True)
     full_baseline = S.read_scorecard(RUNS / "baseline.scorecard.json") or {}
     ok, reason = decide(validated or {}, full_baseline, VALIDATE_DELTA, "判决")
