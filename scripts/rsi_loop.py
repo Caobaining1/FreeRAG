@@ -44,6 +44,7 @@ sys.path.insert(0, str(HERE))
 
 import rsi_propose as P  # noqa: E402
 import rsi_sweep as S  # noqa: E402
+from ragas_eval import load_env  # noqa: E402
 
 REPO = HERE.parent
 RUNS = REPO / "eval" / "runs"
@@ -85,16 +86,25 @@ def save_tried(state: Dict) -> None:
 
 
 def note_knob(state: Dict, name: str, value) -> None:
-    knobs = state.setdefault("knobs", [])
-    if [name, value] not in knobs:
-        knobs.append([name, value])
-    save_tried(state)
+    """Read-modify-write, never write back a dict captured at startup.
+
+    The first version saved the state it had loaded in main(), which silently discarded anything
+    added to the file since — and that is not hypothetical: a `skipped` list written while the loop
+    was running was overwritten by the next candidate's bookkeeping call, so the loop kept sweeping
+    the grid it had been told to stop sweeping.
+    """
+    fresh = load_tried()
+    fresh.setdefault("knobs", [])
+    if [name, value] not in fresh["knobs"]:
+        fresh["knobs"].append([name, value])
+    save_tried(fresh)
 
 
 def note_prompt(state: Dict, name: str, edit: str, reason: str) -> None:
-    prompts = state.setdefault("prompts", {}).setdefault(name, [])
-    prompts.append({"edit": edit[:300], "reason": reason[:200]})
-    save_tried(state)
+    fresh = load_tried()
+    fresh.setdefault("prompts", {}).setdefault(name, []).append(
+        {"edit": edit[:300], "reason": reason[:200]})
+    save_tried(fresh)
 
 
 def append_ledger(rows: List[str]) -> None:
@@ -312,6 +322,11 @@ def main() -> int:
                         help="prompt rounds to run after the knob grid; -1 keeps going until stopped")
     args = parser.parse_args()
 
+    # Loaded here rather than inherited from the shell that started this. A run without the
+    # judge/proposer key fails at the first proposal with HTTP 401 — and because rsi_propose
+    # reports that as SystemExit, it used to take the whole loop down with it.
+    load_env(REPO / ".env")
+
     if not tree_is_clean():
         log("refusing to start: the working tree is not clean, so a revert would not be exact")
         return 1
@@ -360,7 +375,7 @@ def main() -> int:
             try:
                 if run_knob(name, value, accepted) is True:
                     accepted += 1
-            except Exception as exc:  # a broken candidate must not end the run
+            except (Exception, SystemExit) as exc:  # incl. SystemExit: a failed proposal must not end the run
                 append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` → {value} | 异常 | — | — | 跳过 | "
                                f"{type(exc).__name__}: {str(exc)[:100]} |"])
                 log(f"candidate {name}={value} raised: {exc!r}")
@@ -381,7 +396,7 @@ def main() -> int:
             try:
                 if run_prompt(name, accepted, tried_state) is True:
                     accepted += 1
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 append_ledger([f"| {time.strftime('%Y-%m-%d')} | `{name}` | 异常 | — | — | 跳过 | "
                                f"{type(exc).__name__}: {str(exc)[:100]} |"])
                 log(f"candidate {name} raised: {exc!r}")
