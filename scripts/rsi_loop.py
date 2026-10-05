@@ -274,19 +274,29 @@ def head_hash() -> str:
 
 
 def kernel_hash() -> str:
-    """A stamp for the code under measurement: the kernel binary itself.
+    """A stamp for the code under measurement: the content of the kernel's own sources.
 
-    HEAD is the wrong stamp. It moves for every commit, including ones that change nothing
-    the kernel executes, and each move would buy another 40-minute baseline measurement — a
-    cost paid for a change in the script that measures, not in the program measured. The
-    binary is exactly the thing whose behaviour the baseline describes.
+    Neither HEAD nor the binary works, and both were measured rather than assumed:
+
+    - HEAD moves for every commit, including ones that change nothing the kernel executes, and
+      each move would buy another 40-minute baseline — a cost paid for a change in the script
+      that measures rather than in the program measured.
+    - The binary looked right and is not: `go build` embeds VCS state, so its bytes change with
+      every commit too. Reproducible for a given (source, revision, clean/dirty) — three builds
+      of one tree hashed identically — which is exactly why the revision leaking in matters.
+
+    The sources of internal/ and cmd/ change precisely when the program's behaviour can.
     """
     import hashlib
 
-    binary = REPO / "bin" / "freerag"
-    if binary.exists():
-        return hashlib.sha256(binary.read_bytes()).hexdigest()[:16]
-    return head_hash()
+    files = sorted(list((REPO / "internal").rglob("*.go")) + list((REPO / "cmd").rglob("*.go")))
+    if not files:
+        return head_hash()
+    digest = hashlib.sha256()
+    for source in files:
+        digest.update(str(source.relative_to(REPO)).encode("utf-8"))
+        digest.update(source.read_bytes())
+    return digest.hexdigest()[:16]
 
 
 def ensure_screen_baseline() -> Optional[Dict]:

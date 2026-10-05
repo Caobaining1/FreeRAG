@@ -77,6 +77,7 @@ elements — several teams, several people, several datasets. A question whose a
 is one name, one date or one number is not a set: declaring one as a set makes the
 run search for members that do not exist, and it will report the ones it happened
 to find as if the list were complete.
+- A yes/no question ("Did X happen?", "Was there a change?", "Does A suggest B?") has a single yes/no answer: use type "text" and do NOT add "subject" or "scan".
 
 Reply with JSON only, in this shape:
 {"queries": ["first query", "second query"],
