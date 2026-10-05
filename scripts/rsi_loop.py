@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -56,9 +57,20 @@ LEDGER = REPO / "docs" / "rsi-ledger.md"
 # before it is believed. Worth revisiting with two full-dev runs of identical code.
 VALIDATE_DELTA = 0.05
 
-# A hard stop for the score stage. Normal is ~40 minutes; one run was still going after 4.5 hours
-# with 26 seconds of CPU used, i.e. blocked on a stalled request that nothing would have ended.
-SCORE_TIMEOUT_S = 5400
+# A hard stop for the score stage, plus a stall detector — both are needed.
+#
+# Measured: `subprocess.run(..., timeout=SCORE_TIMEOUT_S)` did NOT stop a stalled score. One
+# score child ran 5h56m under this 90-minute timeout, using 2.35 seconds of CPU, with the
+# driver still holding its log file open, and no "timed out" line was ever written. The
+# mechanism is not trusted twice: the child is now started in its own process group and killed
+# by run_scoring below.
+#
+# The stall detector covers the case a deadline alone does not: a child that is not hung
+# outright but is retrying a stalled call. One stage completed 6 of 36 items in 4h18m — it was
+# working, just at a rate that needs a week — and a deadline of an hour would have caught that
+# only after the hour, while its log had been silent for three.
+SCORE_TIMEOUT_S = 3600
+SCORE_STALL_S = 900
 
 # The temperature the product ships with. The decision runs at this value; scripts/ragas_eval.py
 # sets 0 for kernels it starts, which is right for measurement and wrong for a DECISION, since it
@@ -136,6 +148,54 @@ def scorecard(name: str) -> Optional[Dict]:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def run_scoring(cmd: List[str], env: Dict, score_log: Path) -> str:
+    """Run the score stage under a deadline and a stall detector.
+
+    Returns how it ended ("done", or why it was killed) so the caller can say so in the log,
+    rather than trusting a timeout that has already failed once.
+    """
+    started = time.time()
+    with score_log.open("w", encoding="utf-8") as sink:
+        child = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=sink,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+        group = os.getpgid(child.pid)
+        last_seen = time.time()
+        last_size = score_log.stat().st_size
+        while True:
+            if child.poll() is not None:
+                return "done"
+            time.sleep(20)
+            # Re-check for exit BEFORE judging the deadline: the poll interval can outlast a
+            # child that finished quickly, and without this a run that completed was reported
+            # as "deadline" — caught by testing the watchdog with a deadline shorter than the
+            # poll (the case a long production deadline hides).
+            if child.poll() is not None:
+                return "done"
+            try:
+                size = score_log.stat().st_size
+            except OSError:
+                size = last_size
+            if size != last_size:
+                last_size, last_seen = size, time.time()
+            reason = ""
+            if time.time() - last_seen > SCORE_STALL_S:
+                reason = f"stalled: no output for {SCORE_STALL_S}s"
+            elif time.time() - started > SCORE_TIMEOUT_S:
+                reason = f"deadline: over {SCORE_TIMEOUT_S}s"
+            if reason:
+                # The whole group: the judge spawns workers, and killing only the parent
+                # leaves them holding the endpoint open.
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except OSError:
+                    child.kill()
+                try:
+                    child.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
+                return reason
+
+
 def measure(name: str, split: str, temperature: str, fresh: bool) -> Optional[Dict]:
     """Run a candidate on `split` at `temperature`, then judge it.
 
@@ -168,16 +228,14 @@ def measure(name: str, split: str, temperature: str, fresh: bool) -> Optional[Di
         # Output to a file, not captured: the score stage can sit for hours on a stalled call,
         # and with capture_output that is indistinguishable from work. One candidate spent 4.5
         # hours of wall clock and 26 seconds of CPU before anyone could see it was stuck.
-        # The timeout turns that into a failed score, which the retry and the guards already handle.
+        # run_scoring then kills it — on the deadline or on a silent log — and a failed score
+        # is something the retry and the guards already handle.
         score_log = RUNS / f"{name}.score.log"
-        try:
-            with score_log.open("w", encoding="utf-8") as sink:
-                subprocess.run([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
-                                "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
-                                "--judge-workers", "4"], cwd=REPO, env=env, stdout=sink,
-                               stderr=subprocess.STDOUT, timeout=SCORE_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            log(f"decide: scoring timed out after {SCORE_TIMEOUT_S // 60} min; see {score_log.name}")
+        outcome = run_scoring([str(P.RAGAS_PY), "-u", "scripts/ragas_eval.py", "score",
+                               "--run", f"eval/runs/{name}.jsonl", "--with-answer-relevancy",
+                               "--judge-workers", "4"], env, score_log)
+        if outcome != "done":
+            log(f"measure: scoring ended early — {outcome}; see {score_log.name}")
         card = scorecard(name)
         if card is None:
             return None
@@ -215,6 +273,22 @@ def head_hash() -> str:
         return ""
 
 
+def kernel_hash() -> str:
+    """A stamp for the code under measurement: the kernel binary itself.
+
+    HEAD is the wrong stamp. It moves for every commit, including ones that change nothing
+    the kernel executes, and each move would buy another 40-minute baseline measurement — a
+    cost paid for a change in the script that measures, not in the program measured. The
+    binary is exactly the thing whose behaviour the baseline describes.
+    """
+    import hashlib
+
+    binary = REPO / "bin" / "freerag"
+    if binary.exists():
+        return hashlib.sha256(binary.read_bytes()).hexdigest()[:16]
+    return head_hash()
+
+
 def ensure_screen_baseline() -> Optional[Dict]:
     """The code in the tree, measured on the screen's split at the screen's temperature.
 
@@ -228,7 +302,7 @@ def ensure_screen_baseline() -> Optional[Dict]:
     ~3 hours the full-split decision costs per candidate).
     """
     stamp_file = RUNS / "devloop-current.stamp"
-    stamp = head_hash()
+    stamp = kernel_hash()
     if SCREEN_BASELINE.exists() and stamp_file.exists():
         if stamp_file.read_text(encoding="utf-8").strip() == stamp:
             card = S.read_scorecard(SCREEN_BASELINE)

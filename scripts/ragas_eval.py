@@ -427,6 +427,15 @@ def stage_score(args: argparse.Namespace) -> int:
         # as the JSON — which is what made a per-question statement list exceed a
         # default-sized cap.
         max_tokens=args.judge_max_tokens,
+        # No client-level retries, and a bind timeout, because the endpoint STALLS.
+        #
+        # Measured: one score run raised TimeoutError on its first four jobs, then spent
+        # 4h18m completing 6 of 36 items while the process used 2.35 seconds of CPU — every
+        # stalled call was retried inside the client and then again by the evaluator, so a
+        # hang that should cost one job timeout cost most of a night. A stall has to cost
+        # one timeout and be recorded as a lost sample; that is what the NaN guard is for.
+        max_retries=0,
+        timeout=args.judge_timeout,
     )
 
     # Only the metrics that need NO embedder. `answer_relevancy` embeds the
@@ -648,7 +657,11 @@ def main() -> int:
                             "model here once a key has balance.")
     score.add_argument("--judge-base", default=os.environ.get("RAGAS_JUDGE_BASE", "http://localhost:11434/v1"))
     score.add_argument("--metrics", default="", help="comma-separated subset, e.g. faithfulness")
-    score.add_argument("--judge-timeout", type=float, default=1800.0, help="per-job seconds")
+    # 600, not the 1800 this used to be: the observed failure is a STALL, not a slow
+    # answer, and a stalled call is worth 10 minutes of patience at most. At 1800 a single
+    # stalled job costs half an hour, and with a retry underneath it that is how one score
+    # stage burned 4h18m to complete 6 of 36 items.
+    score.add_argument("--judge-timeout", type=float, default=600.0, help="per-job seconds")
     score.add_argument("--judge-max-tokens", type=int, default=32768,
                        help="judge output cap; a reasoning model spends this on reasoning too, and "
                             "8192 truncated 12 of 24 faithfulness jobs into silent NaN")
