@@ -458,6 +458,15 @@ def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
     if not new_prompt or new_prompt == current or "`" in new_prompt:
         log("proposal unusable")
         return None
+    # The screen baseline is established BEFORE the candidate is applied.
+    #
+    # This ordering is load-bearing. Measured: with ensure_screen_baseline called after
+    # path.write_text, the tree being measured already contained the candidate's prompt — so the
+    # "baseline" was the candidate, and the screen compared the candidate against itself. It
+    # showed up only as a stamp mismatch in the log (the hash of the sources with the candidate
+    # in them, not the shipped tree), and it would have made every verdict meaningless while
+    # looking like it worked.
+    screen_baseline = ensure_screen_baseline() or {}
     # Written BEFORE it is applied, for the same reason rsi_propose does it: a candidate costs
     # about 2.5 hours, and an interruption must not lose what was being measured. One did — the
     # loop was stopped mid-measurement and the edit's text went with it, so the record could not
@@ -481,8 +490,7 @@ def run_prompt(name: str, accepts: int, tried: Dict) -> Optional[bool]:
     # The screen decides nothing: the acceptance rule, its guards and its threshold are
     # unchanged, and a survivor is still decided on the full split at the shipped
     # temperature. §13.16's rule was never "do not look at ten questions" — it was "do not
-    # decide on them".
-    screen_baseline = ensure_screen_baseline() or {}
+    # decide on them". Its baseline was established above, before the candidate went in.
     screened = measure_dev_loop(f"screen-{name}", fresh=True)
     screen_ok, screen_reason = decide(screened or {}, screen_baseline, SCREEN_DELTA, "筛选")
     if not screen_ok:
