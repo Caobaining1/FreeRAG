@@ -99,3 +99,4 @@
 
 > **备注**：该候选的提案原文未留存 ✗（驱动当时还没实现「测量前落盘」，我中途停了它 ✗）。判决数值本身有效 ✓（usable=True、NaN 在守卫容忍内 ✓，判分是卡死后重判的 ✓）。驱动现已改为测量前落盘 ✓，且中断后会留下 pending 记录 ✓。
 | 2026-10-04 | `queryRewriteSystemPrompt` +313 chars | 0.5245 | 0.4648 | 否决 | measurement incomplete: faithfulness lost 2 sample(s) to judge failures against the baseline's 0; re-score before deciding |
+| 2026-10-05 | `queryRewriteSystemPrompt` +186 chars | 0.3596 | 0.3911 | 筛除 | measurement incomplete: context_precision lost 2 sample(s) to judge failures against the baseline's 1; re-score before deciding |
