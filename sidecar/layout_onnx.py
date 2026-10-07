@@ -135,7 +135,7 @@ ACCELERATOR_PROVIDERS = (
 #: Overridable with FREERAG_LAYOUT_THREADS for a machine that behaves otherwise.
 DEFAULT_CPU_THREADS = 1
 
-#: Which providers to run on: "cpu" (default), "auto", or an explicit list.
+#: Which providers to run on: "auto" (default), "cpu", or an explicit list.
 #:
 #: CPU is the default because of how the pipeline pays for a session. Measured on
 #: a MacBook Air M5 / 10 cores, 3 real corpus PDFs (8 pages), same code path:
@@ -158,12 +158,16 @@ DEFAULT_CPU_THREADS = 1
 #:                                                the cache has nothing to save
 #:
 #: So with caching in place CoreML is 6.3x faster than CPU, and "auto" is the
-#: configuration to want. "cpu" is still the default only because it was asked
-#: for explicitly; flipping it is this line. The CPU path remains the fallback
-#: for machines without an accelerator, where it is the only option anyway.
-#: FREERAG_ONNX_PROVIDERS overrides it per run, e.g. "auto" or
+#: configuration to want. It is now the default: re-measured before flipping it
+#: (6 real PDF pages, same file both ways) at 1.82 s/page on CPU against 0.22 on
+#: CoreML — 7.6x including the 7.5 s one-off compile, and every page came back
+#: with the same labels and boxes to within 0.1 px. The CPU path remains the
+#: fallback for machines without an accelerator, where it is the only option
+#: anyway: "auto" resolves against what this build of onnxruntime can actually
+#: provide, so such a machine gets CPU without asking.
+#: FREERAG_ONNX_PROVIDERS overrides it per run, e.g. "cpu" or
 #: "CoreMLExecutionProvider,CPUExecutionProvider" for a like-for-like comparison.
-DEFAULT_PROVIDER_CHOICE = "cpu"
+DEFAULT_PROVIDER_CHOICE = "auto"
 
 
 def provider_choice() -> str:

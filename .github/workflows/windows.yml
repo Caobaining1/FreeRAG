@@ -1,0 +1,90 @@
+name: windows
+
+# Everything in here is something that cannot be checked on a Mac.
+#
+# Two questions it exists to answer:
+#
+#   1. Does requirements.txt's platform marker actually land DirectML on a
+#      Windows machine? `auto` silently falls back to CPU when it cannot, and
+#      that is invisible from the outside — the model runs, just slower. The
+#      only way to know is to build a session on a machine that has a Windows
+#      GPU runtime and ask it what it got.
+#   2. Do the Windows paths in scripts/fetch-python-runtime.sh hold? (python.exe
+#      at the top level rather than bin/python3, Lib rather than lib/python3.14.)
+#      Those were reasoned from the release layout, never run.
+#
+# Manual only: there is no remote to push to yet, and a Windows runner is not
+# something to spend on every commit.
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 1. kernel
+        run: go build -o bin/freerag.exe ./cmd/freerag
+
+      - name: 2. vendored CPython (exercises the Windows asset paths)
+        shell: bash
+        run: bash scripts/fetch-python-runtime.sh
+
+      - name: 3. deepdoc models
+        shell: bash
+        run: bash scripts/download-models.sh deepdoc
+
+      # The answer to question 1. `warmup` reports what the sessions got, not
+      # what the platform offers: read the `providers` field of the reply.
+      # DmlExecutionProvider present means the DirectML wheel was installed and
+      # picked up; only CPUExecutionProvider means the marker did not fire.
+      - name: 4. which providers does Windows actually get
+        shell: bash
+        env:
+          FREERAG_LAYOUT_MODEL: models/deepdoc/layout.onnx
+          FREERAG_TSR_MODEL: models/deepdoc/tsr.onnx
+        run: |
+          printf '{"jsonrpc":"2.0","id":1,"method":"warmup"}\n' \
+            | desktop/vendor/python/python.exe sidecar/parse_server.py
+
+      - name: 5. kernel answers over stdio
+        env:
+          FREERAG_DATA: ${{ runner.temp }}\freerag-index.json
+        run: |
+          printf '{"jsonrpc":"2.0","id":1,"method":"ping"}\n' | .\bin\freerag.exe
+
+  # Expected to fail today, and that is the point: scripts/build-installer.sh
+  # has no Windows Qdrant asset, so it will print "no Qdrant build for ..." and
+  # electron-builder will then refuse the missing extraResources. The failure
+  # message is the list of what packaging for Windows still needs.
+  package:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: package (see the note above — failing is informative here)
+        shell: bash
+        run: bash scripts/build-installer.sh --dir
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: freerag-windows
+          path: dist/**/*.exe
+          if-no-files-found: ignore

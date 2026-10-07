@@ -12,7 +12,8 @@
  */
 
 const { app, BrowserWindow, dialog, ipcMain, nativeTheme } = require('electron');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const readline = require('node:readline');
@@ -147,6 +148,14 @@ const SETTINGS_DEFAULTS = {
   // '' follows the language of the question; 'zh' or 'en' forces it.
   answerLanguage: '',
   vision: true,
+  // Which describer handles figures: 'general' is the sidecar's vision model,
+  // 'chart' hands statistical charts to Laya-Chart (chartvlm/server.py), which
+  // transcribes them into a data table instead of describing them.
+  //
+  // Not a third state of `vision` on purpose: the two are mutually exclusive and
+  // 'general' has to stay the default, because it describes a figure BEFORE the
+  // figure/caption merge while the chart path runs after the parse.
+  visionBackend: 'general',
   visionModel: 'qwen2.5vl:3b',
   // Measured on the reference machine (docs/plan.md §5.4.1): 4 workers gave
   // 2.75x over 1, 155 is what the model actually writes for a figure, and the
@@ -189,6 +198,13 @@ function validateSettings(incoming) {
     }
   }
   if ('vision' in incoming) settings.vision = Boolean(incoming.vision);
+  if ('visionBackend' in incoming) {
+    if (['general', 'chart'].includes(incoming.visionBackend)) {
+      settings.visionBackend = incoming.visionBackend;
+    } else {
+      errors.push(`unknown vision backend: ${JSON.stringify(incoming.visionBackend)}`);
+    }
+  }
   if ('visionModel' in incoming) {
     const model = String(incoming.visionModel || '').trim();
     if (!model) errors.push('vision model must not be empty');
@@ -218,7 +234,7 @@ function kernelSettingsPayload(settings) {
   };
 }
 
-function kernelEnv(runtime, qdrantReady) {
+function kernelEnv(runtime, qdrantReady, hardware) {
   const userData = app.getPath('userData');
   const env = {
     ...process.env,
@@ -231,13 +247,26 @@ function kernelEnv(runtime, qdrantReady) {
     FREERAG_TSR_MODEL: path.join(runtime.models, 'deepdoc', 'tsr.onnx'),
     FREERAG_LAYA_DIR: path.join(runtime.models, 'laya-onnx'),
     FREERAG_PARSE_SIDECAR: path.join(runtime.sidecar, 'parse_server.py'),
+    // Total memory, from the scan at the top of whenReady. Handed over because
+    // the kernel is the process that would load several GB of vision weights
+    // into it, and a model that does not fit does not fail — it swaps, and the
+    // machine stops responding while indexing runs.
+    FREERAG_HW_MEMORY_BYTES: String(hardware?.memoryBytes || 0),
   };
   // What the user chose last time. Environment rather than an RPC because these
   // have to be in force before the first parse, and because the sidecar reads
   // the shared ones (FREERAG_VLM_*) itself.
   const settings = readSettings();
   env.FREERAG_ANSWER_LANGUAGE = settings.answerLanguage;
-  env.FREERAG_VLM = settings.vision ? 'on' : 'off';
+  // 'on' is deliberately not 'go': the kernel's own vision path is opt-in and
+  // separate from the sidecar's, and turning it on here would describe every
+  // figure twice. Only 'chart' switches the figure path, because that backend
+  // has no sidecar equivalent — it transcribes rather than describes.
+  env.FREERAG_VLM = !settings.vision
+    ? 'off'
+    : settings.visionBackend === 'chart'
+      ? 'chart'
+      : 'on';
   // The model name is what the parse-time captioner keys off (sidecar/vlm.py
   // takes it as `vlm_model` on the parse request), so switching vision OFF has
   // to clear it — an empty name is how that path is disabled.
@@ -678,6 +707,95 @@ function writePrefs(payload) {
 }
 
 /**
+ * What this machine is, scanned once and cached.
+ *
+ * Scanned rather than read off `process.platform` because the two disagree in
+ * exactly the cases that matter: a Windows box with no NVIDIA driver, and one
+ * whose driver does not match the CUDA runtime our onnxruntime was built
+ * against, look identical from Node. Asking the driver is the only way to
+ * tell them apart — and the difference decides whether "auto" resolves to
+ * CoreML/CUDA or silently to CPU.
+ *
+ * Cached because it cannot change without the hardware changing, and because
+ * the scan shells out: once per install, not once per launch.
+ */
+const HARDWARE_SCHEMA = 1;
+
+function hardwarePath() {
+  return path.join(app.getPath('userData'), 'hardware.json');
+}
+
+/** Asks the NVIDIA driver what it has, or null when there is nothing to ask. */
+function nvidiaGpu() {
+  try {
+    const run = spawnSync('nvidia-smi',
+      ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
+      { encoding: 'utf8', timeout: 4000, windowsHide: true });
+    if (run.status !== 0 || !run.stdout) return null;
+    const [name, memory] = String(run.stdout).trim().split('\n')[0].split(',');
+    // nvidia-smi reports MiB; everything downstream counts bytes.
+    return {
+      vendor: 'nvidia',
+      backend: 'cuda',
+      name: (name || '').trim(),
+      memoryBytes: Number(memory || 0) * 1024 * 1024,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function scanHardware() {
+  const cpus = os.cpus();
+  // "metal" rather than "Apple Silicon": it is the name the runtimes ask for,
+  // and an Intel Mac with a supported GPU answers the same way.
+  const accelerator = nvidiaGpu() || (process.platform === 'darwin'
+    ? { vendor: 'apple', backend: 'metal', name: cpus[0]?.model || '', memoryBytes: 0 }
+    : { vendor: '', backend: 'cpu', name: '', memoryBytes: 0 });
+  return {
+    schemaVersion: HARDWARE_SCHEMA,
+    scannedAt: new Date().toISOString(),
+    platform: process.platform,
+    arch: process.arch,
+    cpu: { model: cpus[0]?.model || '', cores: cpus.length },
+    memoryBytes: os.totalmem(),
+    accelerator,
+  };
+}
+
+/** Writes the scan atomically, the way the preferences are written. */
+function writeHardware(payload) {
+  try {
+    const target = hardwarePath();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temporary = `${target}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(payload, null, 2), 'utf8');
+    fs.renameSync(temporary, target);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
+/**
+ * The cached scan, scanning on first launch or after the schema changes.
+ *
+ * Called for its result but also for its side effect: the first launch is when
+ * this has to happen, and there is nothing to wait for.
+ */
+function readHardware() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(hardwarePath(), 'utf8'));
+    if (parsed && parsed.schemaVersion === HARDWARE_SCHEMA) return parsed;
+  } catch {
+    // Absent, unreadable, or written by an older schema: all scan again.
+  }
+  const scanned = scanHardware();
+  writeHardware(scanned);
+  return scanned;
+}
+
+/**
  * Resolves the theme to open in.
  *
  * Three sources, in the order that makes each one useful:
@@ -709,6 +827,17 @@ function resolveTheme() {
 app.whenReady().then(async () => {
   const runtime = resolveRuntime();
 
+  // Scanned at launch, on the first one and on any launch whose cached scan is
+  // from an older schema — not when the settings dialog happens to be opened.
+  // The scan is what decides which inference backends are worth asking for, and
+  // a first document parsed before anyone opened settings would otherwise be
+  // the thing that discovers it.
+  const hardware = readHardware();
+  // Said out loud, because it is the one line that explains a machine running
+  // slower than the user expects: "cpu" here means every model will, too.
+  emitLog(`hardware: ${hardware.accelerator?.backend || 'cpu'} · ` +
+    `${hardware.cpu?.cores || '?'} cores · ${(hardware.memoryBytes / 1024 ** 3).toFixed(0)} GB`);
+
   // Awaited on purpose: the kernel decides at startup whether dense retrieval
   // is remote or in-process, so it must not start until Qdrant answers.
   const service = await startQdrant(runtime, emitLog);
@@ -716,7 +845,7 @@ app.whenReady().then(async () => {
 
   kernel = new KernelClient({
     binPath: kernelBinary(runtime),
-    env: kernelEnv(runtime, service.ready),
+    env: kernelEnv(runtime, service.ready, hardware),
     onLog: emitLog,
     onExit: () => broadcast('kernel-status', { running: false }),
     onEvent: (msg) => broadcast('kernel-event', msg),
@@ -766,6 +895,17 @@ app.whenReady().then(async () => {
   // Preferences live here for the same reason the chat history does: nothing in
   // the retrieval pipeline reads which theme is on, so the kernel has no
   // business knowing about it.
+  // The scan is reported as two things, and the difference is the point: what
+  // the machine has, and what the models actually got. A machine can offer an
+  // accelerator and still run on CPU because its runtime lacks the provider,
+  // and that is silent everywhere except here.
+  ipcMain.handle('hardware-load', () => readHardware());
+  ipcMain.handle('hardware-rescan', () => {
+    const scanned = scanHardware();
+    writeHardware(scanned);
+    return scanned;
+  });
+
   ipcMain.handle('prefs-load', () => {
     const resolved = resolveTheme();
     return {

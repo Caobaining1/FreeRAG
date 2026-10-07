@@ -49,16 +49,41 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-x86_64) TRIPLE="x86_64-apple-darwin" ;;
   Linux-x86_64)  TRIPLE="x86_64-unknown-linux-gnu" ;;
   Linux-aarch64) TRIPLE="aarch64-unknown-linux-gnu" ;;
+  # Windows is x86_64 only: there is no python-build-standalone arm64 build.
+  # The uname prefixes are what Git Bash, MSYS2 and Cygwin each report.
+  MINGW*-x86_64|MSYS*-x86_64|CYGWIN*-x86_64) TRIPLE="x86_64-pc-windows-msvc" ;;
   *)
     echo "no python-build-standalone build for $(uname -s)-$(uname -m)" >&2
     exit 1
     ;;
 esac
 
+# Where the interpreter, the stdlib and the console scripts end up. These differ
+# by platform in ways that are easy to get wrong silently: python-build-standalone
+# puts the interpreter at bin/python3 on unix but at the top level as python.exe
+# on Windows, and the stdlib is lib/python3.14 versus Lib.
+#
+# The Windows arm has never been run on a Windows machine — it is here because
+# the triple above exists and because a missing arm is why Windows was
+# "unsupported" at all, but the paths below are reasoned from the release layout,
+# not observed.
+case "$TRIPLE" in
+  *windows*)
+    PYBIN="$DEST/python.exe"
+    STDLIB="$DEST/Lib"
+    BIN="$DEST/Scripts"
+    ;;
+  *)
+    PYBIN="$DEST/bin/python3"
+    STDLIB="$DEST/lib/python3.14"
+    BIN="$DEST/bin"
+    ;;
+esac
+
 ASSET="cpython-${PY_VERSION}+${PBS_TAG}-${TRIPLE}-install_only.tar.gz"
 URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${ASSET}"
 
-if [[ -x "$DEST/bin/python3" && "$FORCE" == "0" ]]; then
+if [[ -x "$PYBIN" && "$FORCE" == "0" ]]; then
   say "already vendored"
   note "$DEST ($(du -sh "$DEST" | cut -f1))"
   note "rebuild with --force"
@@ -122,13 +147,23 @@ say "2. extract"
 # lands directly in $DEST and its path inside the app bundle is predictable.
 mkdir -p "$DEST"
 tar xzf "$TARBALL" -C "$DEST" --strip-components=1
-"$DEST/bin/python3" --version | sed 's/^/   /'
+"$PYBIN" --version | sed 's/^/   /'
 
 # --- dependencies -----------------------------------------------------------
 
 say "3. install the sidecar's dependencies"
-"$DEST/bin/python3" -m pip install --no-cache-dir --disable-pip-version-check -q \
-  -r "$ROOT/requirements.txt"
+
+# The accelerator build is chosen by platform inside requirements.txt (PEP 508
+# markers — DirectML on Windows, CoreML-carrying base wheel everywhere else), so
+# the default needs nothing from here. `cuda` is the one override, and it is an
+# override because it is a statement about the machine the app will run on:
+# a ~2 GB wheel set in exchange for the CUDA provider.
+REQ="$ROOT/requirements.txt"
+if [[ "${ORT_FLAVOUR:-auto}" == "cuda" ]]; then
+  REQ="$ROOT/requirements-cuda.txt"
+  note "ORT_FLAVOUR=cuda — onnxruntime-gpu, ~2 GB of wheels"
+fi
+"$PYBIN" -m pip install --no-cache-dir --disable-pip-version-check -q -r "$REQ"
 note "pymupdf / onnxruntime / numpy / tokenizers installed"
 
 # --- prune ------------------------------------------------------------------
@@ -137,7 +172,7 @@ say "4. prune"
 
 # Everything below is dead weight for a runtime that only runs the sidecar.
 # Each removal was checked against imports the sidecar actually performs.
-STDLIB="$DEST/lib/python3.14"
+# (STDLIB itself is set with the other platform paths, above.)
 
 prune() {
   local path="$1" why="$2"
@@ -176,7 +211,8 @@ prune "$DEST/share" "man pages"
 
 # Console scripts left behind by the uninstalls above.
 for script in pip pip3 pip3.14 idle3 idle3.14 f2py numpy-config onnxruntime_test hf huggingface-cli httpx; do
-  rm -f "$DEST/bin/$script"
+  # .exe as well: the Windows layout puts console scripts in Scripts/, suffixed.
+  rm -f "$BIN/$script" "$BIN/$script.exe"
 done
 find "$DEST" -name '*.a' -delete 2>/dev/null || true
 
@@ -195,12 +231,12 @@ find "$DEST" -name '*.a' -delete 2>/dev/null || true
 
 say "5. verify"
 
-if [[ ! -x "$DEST/bin/python3" ]]; then
+if [[ ! -x "$PYBIN" ]]; then
   echo "the vendored interpreter is missing or not executable" >&2
   exit 1
 fi
 
-"$DEST/bin/python3" - <<'PY'
+"$PYBIN" - <<'PY'
 import sys
 
 # Every one of these is imported by the sidecar at startup or on first use.
@@ -209,6 +245,12 @@ import numpy, onnxruntime, pymupdf, tokenizers
 print("   python      %s" % sys.version.split()[0])
 print("   pymupdf     %s" % pymupdf.__version__)
 print("   onnxruntime %s" % onnxruntime.__version__)
+# The payoff line for step 3, and the reason it is printed rather than assumed:
+# this says which providers the wheel that was actually installed can reach. A
+# Windows or Linux runtime reporting nothing but CPU here came from the wrong
+# wheel, and that is invisible everywhere else — inference simply runs slower,
+# and `auto` resolves to CPU without a word about it.
+print("   providers   %s" % ", ".join(onnxruntime.get_available_providers()))
 print("   numpy       %s" % numpy.__version__)
 print("   tokenizers  %s" % tokenizers.__version__)
 

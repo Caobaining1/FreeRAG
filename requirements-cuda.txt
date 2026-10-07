@@ -1,0 +1,25 @@
+# The same four dependencies, with the CUDA build of onnxruntime in place of the
+# CPU one. For Linux machines with an NVIDIA card and a driver that matches the
+# CUDA runtime this wheel was built against.
+#
+#   .venv314/bin/python -m pip install -r requirements-cuda.txt
+#
+# OPT-IN, and the size is why: onnxruntime-gpu pulls CUDA and cuDNN with it,
+# which is on the order of 2 GB of wheels against ~40 MB for the CPU build. That
+# is a fair trade on a workstation that parses documents all day and a bad one
+# in a desktop installer that ships to machines whose graphics card nobody has
+# looked at — so it is a choice, not a default.
+#
+# Deliberately does NOT `-r requirements.txt`: both files name a package that
+# provides the `onnxruntime` module, and inheriting would install two builds of
+# it with the winner decided by install order. The four lines below are
+# duplicated on purpose; if one changes here, change it there.
+#
+# The driver has to match, and nothing checks it for you: an onnxruntime-gpu
+# built for CUDA 12 on a machine with an 11.x driver falls back to CPU without
+# saying so — which is what `default_providers()` and the sidecar's `warmup`
+# report exist to make visible.
+pymupdf>=1.24
+numpy>=1.24
+tokenizers>=0.15
+onnxruntime-gpu>=1.17

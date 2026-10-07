@@ -10,7 +10,27 @@
 pymupdf>=1.24
 
 # PP-DocLayout layout detection and Laya typed decisions both run through this.
-onnxruntime>=1.17
+#
+# Which BUILD of it is chosen by platform, and that is most of the acceleration
+# story outside macOS: the base wheel carries CoreML, so a Mac is accelerated
+# for free, but the same wheel on Windows or Linux can only ever reach the CPU
+# provider — silently. `onnxruntime-directml` is the same module built with the
+# DirectML provider, which every Windows GPU answers to (AMD, Intel and NVIDIA
+# alike, with no CUDA runtime to match), and it costs ~30 MB over the CPU build.
+#
+# Exactly one of these is ever installed: pip evaluates the markers against the
+# machine it runs on, and both provide the same `onnxruntime` module, so listing
+# two without a marker would let install order decide which one wins.
+#
+# Sorted by platform rather than by the graphics card in this machine, because
+# the desktop installer vendors these on a build machine — whose GPU says
+# nothing about the machine the app will eventually run on.
+onnxruntime>=1.17; sys_platform != "win32"
+onnxruntime-directml>=1.17; sys_platform == "win32"
+
+# Linux with an NVIDIA card: see requirements-cuda.txt. It is opt-in on purpose
+# — the CUDA build is ~2 GB of wheels against ~40 MB, and it only pays off on a
+# machine that has both the card and a matching driver.
 
 # Array handling for the letterbox preprocessing and the decision scores.
 numpy>=1.24

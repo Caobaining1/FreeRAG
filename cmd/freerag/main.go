@@ -54,6 +54,22 @@ type kernel struct {
 	// the simple/complex router and the per-round tool chooser. Nil when Laya
 	// is unavailable, in which case all three fall back to deterministic paths.
 	decider agent.DecideFunc
+	// layaReady is whether the typed-decision model answered at startup.
+	//
+	// Kept separately from `decider` because the two are not the same question:
+	// decider is the agent-loop closure, and it is nil both when Laya is missing
+	// and when a caller wants a different one. The directory-tree router asks
+	// "may I route with the model", and a wrong yes there would send every query
+	// through a decider that does not exist — silently keyword-routed, which is
+	// indistinguishable from the model having chosen those folders.
+	layaReady bool
+	// deepdoc is what the sidecar's warm-up reported: which provider the layout
+	// and table-structure models actually run on. Nil until the warm-up
+	// finishes, and never a guess in the meantime — a machine can offer an
+	// accelerator and still land on CPU, and that is silent everywhere except
+	// in this report.
+	deepdocMu sync.Mutex
+	deepdoc   *parser.WarmupReport
 	// generator is the local LLM client; nil when Ollama is unavailable and the
 	// loop must fall back to extractive drafts.
 	generator *agent.OllamaModel
@@ -93,6 +109,14 @@ type kernel struct {
 	// are interfaces so the stage can be tested without Ollama or PyMuPDF.
 	captioner captioner
 	renderer  figureRenderer
+	// chart is the Laya-Chart backend (vision_chart.go). Set instead of
+	// captioner, never alongside it: the two describe the same figure and one
+	// of them would be describing it twice.
+	chart *chartClient
+	// chartService is that backend's process, when this kernel started it.
+	// Nil when the service was already running at FREERAG_CHART_ENDPOINT, in
+	// which case it is not ours to stop.
+	chartService *chartService
 	// visionOnce and visionSlot bound the caption stage process-wide (see
 	// visionGate): the batch indexes several documents at once, so the bound
 	// cannot live per document.
@@ -136,6 +160,15 @@ func run() error {
 			}
 		}()
 	}
+	if app.chartService != nil {
+		// Stopped on the way out so its 7.4 GB of weights do not stay resident
+		// in a machine the user has moved on from.
+		defer func() {
+			if err := app.chartService.Close(); err != nil {
+				log.Printf("chart service shutdown: %v", err)
+			}
+		}()
+	}
 
 	srv := ipc.NewServer()
 	app.register(srv)
@@ -143,7 +176,19 @@ func run() error {
 	// Started before Serve so it overlaps with the shell's own startup, and
 	// deliberately not awaited: it exists to keep the first question fast, so
 	// blocking readiness on it would trade one wait for another.
+	//
+	// All three warm-ups overlap on purpose: one builds the generator's weights
+	// on the GPU, the other two build ONNX sessions on the CPU, and none is on
+	// the path of another. Serialising them would spend the same wall time
+	// twice for no reason.
+	//
+	// The two ONNX ones do share the sidecar process, which is fine because
+	// they are different models under different registry locks — and because
+	// Laya's session stays on CPU (measured 15x slower on CoreML), so it is not
+	// competing for the ANE compiler that the layout model is using.
 	app.warmGenerator()
+	app.warmDecider()
+	app.warmDeepdoc()
 
 	log.Printf("freerag kernel %s ready (JSON-RPC 2.0 over stdio); %d knowledge base(s) under %s",
 		version, len(app.kbs.List()), dataDir())
@@ -163,6 +208,7 @@ func newKernel() (*kernel, error) {
 		log.Printf("parse sidecar: %s %s", cfg.Python, cfg.Script)
 	}
 	app.decider = newDecider(app.parse)
+	app.layaReady = app.decider != nil
 	app.checker = newChecker(app.parse, app.decider)
 	app.embedder = newEmbedder()
 
@@ -185,19 +231,58 @@ func newKernel() (*kernel, error) {
 	// or there is no client, and then figures keep the text they were extracted
 	// with — which is what shipped before this stage existed.
 	app.settings = defaultSettings()
-	if settings, enabled := app.captionSettings(); enabled && app.generator != nil {
-		// A copy with its own timeout, not the generator itself. One caption
-		// can wait for a cold model load AND a full description while three
-		// others run alongside it; measured on the reference machine, that
-		// exceeded the generator's 3-minute budget and lost the figure
-		// ("context deadline exceeded" with 4 figures in flight). A lost figure
-		// is only a missing description — the extracted text stays — but it is
-		// avoidable, and the vision model is the slowest thing here.
-		vision := *app.generator
-		vision.Timeout = 10 * time.Minute
-		app.captioner = &vision
-		log.Printf("figure captions: %s (concurrency %d, max %d tokens, longest side %dpx)",
-			settings.Model, settings.Workers, settings.MaxTokens, settings.MaxSide)
+	if settings, enabled := app.captionSettings(); enabled {
+		switch settings.Backend {
+		case chartBackend:
+			// The chart backend needs no generator: it reaches its own service,
+			// so a machine with no Ollama can still index charts.
+			//
+			// Started here unless the operator pointed at one that is already
+			// running. Owning the process is the difference between "charts are
+			// indexed" and "the backend is configured but nothing describes
+			// anything", which look identical from the outside.
+			endpoint := settings.Endpoint
+			if _, external := os.LookupEnv("FREERAG_CHART_ENDPOINT"); !external {
+				// Checked before the process is started rather than after it
+				// has swapped: the weights are resident, so the machine this
+				// runs on has to have room for them, and a model that does not
+				// fit does not error — it takes the desktop down with it.
+				if err := checkChartMemory(); err != nil {
+					log.Printf("warning: figure captions disabled: %v", err)
+					break
+				}
+				service, err := startChartService()
+				if err != nil {
+					// Not fatal: figures keep their extracted text, which is
+					// what shipped before this backend existed.
+					log.Printf("warning: figure captions disabled: %v", err)
+					break
+				}
+				app.chartService = service
+				endpoint = service.endpoint
+			}
+			app.chart = newChartClient(endpoint, defaultChartTimeout)
+			log.Printf("figure captions: %s at %s (concurrency %d, longest side %dpx)%s",
+				settings.Model, endpoint, settings.Workers, settings.MaxSide,
+				ownedSuffix(app.chartService))
+		default:
+			if app.generator == nil {
+				break
+			}
+			// A copy with its own timeout, not the generator itself. One caption
+			// can wait for a cold model load AND a full description while three
+			// others run alongside it; measured on the reference machine, that
+			// exceeded the generator's 3-minute budget and lost the figure
+			// ("context deadline exceeded" with 4 figures in flight). A lost
+			// figure is only a missing description — the extracted text stays —
+			// but it is avoidable, and the vision model is the slowest thing
+			// here.
+			vision := *app.generator
+			vision.Timeout = 10 * time.Minute
+			app.captioner = &vision
+			log.Printf("figure captions: %s (concurrency %d, max %d tokens, longest side %dpx)",
+				settings.Model, settings.Workers, settings.MaxTokens, settings.MaxSide)
+		}
 	}
 	return app, nil
 }
@@ -414,6 +499,14 @@ func generatorKeepAlive() string {
 // Set on the parse request, never read on the query path — the model is for
 // turning a figure into text once, at index time (see sidecar/vlm.py).
 func vlmModel() string {
+	// The parse-time captioner (sidecar/vlm.py) only speaks Ollama. With the
+	// chart backend selected, FREERAG_VLM_MODEL names a service Ollama has never
+	// heard of, so passing it along would both fail a pull for
+	// "laya-chart-1.7b" on every figure and describe every figure twice — once
+	// per path, which is exactly what the split between them exists to prevent.
+	if env, enabled := visionConfig(); enabled && env.Backend == chartBackend {
+		return ""
+	}
 	return strings.TrimSpace(os.Getenv("FREERAG_VLM_MODEL"))
 }
 
@@ -505,6 +598,94 @@ func (k *kernel) warmGenerator() {
 	}()
 }
 
+// warmDecider builds Laya's inference session in the background.
+//
+// The session is built on the first decision, not on `HasLaya` — a 1.7 GB fp32
+// checkpoint is not something a parse-only workload should pay for — so without
+// this the cost lands inside the first question's routing step. Measured on the
+// reference machine (MacBook Air M5): ~20 s of the first answer's wait, spent
+// in a step the UI has already announced as "正在决定检索动作", i.e. a wait
+// that looks exactly like a hang.
+//
+// Same contract as warmGenerator: not awaited, errors logged and dropped. A
+// decision that cannot be made degrades to the heuristics the kernel already
+// falls back to, and a warm-up failure is that one step earlier.
+func (k *kernel) warmDecider() {
+	if k.decider == nil {
+		return
+	}
+	go func() {
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		// Two options and a `choice` kind, which is the shape routing and tool
+		// choice use. The point is to exercise the whole path — tokenize,
+		// build, score — not to get a meaningful answer, so the text is
+		// throwaway.
+		_, _, err := k.decider(ctx, agent.DecisionChoice,
+			"Warm-up: which option?", map[string]string{"a": "a", "b": "b"}, "warm-up")
+		if err != nil {
+			log.Printf("warning: Laya warm-up failed (%v); the first question will pay for building the session", err)
+			return
+		}
+		log.Printf("Laya warm-up done in %s", time.Since(started).Round(time.Millisecond))
+	}()
+}
+
+// warmDeepdoc builds the layout and table-structure sessions in the sidecar.
+//
+// The cost being moved is real and one-off: the accelerated layout session
+// compiles 657 of the model's 681 nodes and measured 7.5 s here, and it used to
+// be charged to whichever document the user parsed first — inside a step the UI
+// had already announced, which reads as a hang rather than as a one-off.
+//
+// The second thing this buys is the provider each session actually got, logged
+// rather than assumed. That is the whole point of measuring instead of
+// trusting the platform: the same build resolves "auto" to CoreML on this
+// machine and to CPU on one whose onnxruntime lacks the provider, and the
+// difference is silent everywhere except here.
+//
+// Same contract as the other two: not awaited, errors logged and dropped.
+func (k *kernel) warmDeepdoc() {
+	if k.parse == nil {
+		return
+	}
+	go func() {
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+
+		report, err := k.parse.Warmup(ctx)
+		if err != nil {
+			log.Printf("warning: deepdoc warm-up failed (%v); the first document will pay for building the session", err)
+			return
+		}
+		k.deepdocMu.Lock()
+		k.deepdoc = report
+		k.deepdocMu.Unlock()
+		if !report.Layout.Available && !report.TSR.Available {
+			log.Printf("deepdoc warm-up: neither the layout nor the table model is installed")
+			return
+		}
+		for name, model := range map[string]parser.WarmupModel{
+			"layout": report.Layout,
+			"tsr":    report.TSR,
+		} {
+			if !model.Available {
+				continue
+			}
+			if model.Error != "" {
+				log.Printf("warning: deepdoc %s session failed (%s); it will fall back to CPU", name, model.Error)
+				continue
+			}
+			log.Printf("deepdoc %s session built in %.1fs on %s", name, model.Seconds, model.Provider)
+		}
+		log.Printf("deepdoc warm-up done in %s; the sessions are reused for the life of the sidecar",
+			time.Since(started).Round(time.Millisecond))
+	}()
+}
+
 // contextTokens is the context window requested from the generator.
 //
 // Ollama's own default is 4096, which is smaller than the evidence block the
@@ -517,6 +698,63 @@ func contextTokens() int {
 		}
 	}
 	return agent.DefaultContextTokens
+}
+
+// refragConfig reads the selective evidence compression settings (refrag.go).
+//
+// OFF unless FREERAG_REFRAG says otherwise, and the switch is spelled out
+// rather than implied by the presence of the other two: a deployment that sets
+// only a tunable must not silently change its prompt. Anything unrecognised is
+// off, for the same reason.
+func refragConfig() agent.RefragConfig {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("FREERAG_REFRAG"))) {
+	case "1", "on", "true", "yes":
+	default:
+		return agent.RefragConfig{}
+	}
+	cfg := agent.RefragConfig{
+		Enabled:   true,
+		ExpandTop: agent.DefaultRefragExpandTop,
+		GistChars: agent.DefaultRefragGistChars,
+	}
+	if raw := strings.TrimSpace(os.Getenv("FREERAG_REFRAG_EXPAND_TOP")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			cfg.ExpandTop = parsed
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("FREERAG_REFRAG_GIST_CHARS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			cfg.GistChars = parsed
+		}
+	}
+	return cfg
+}
+
+// streamCoalesceWindow is how long an answer fragment may wait to be merged
+// with the next one. Zero — the default — emits every fragment immediately.
+//
+// Off by default because the measurement says so (docs/performance.md): the
+// generator emits ~6.4 tokens/s, so a frame costs microseconds and there is
+// nothing to amortise, while the window is pure added latency. The switch
+// exists for machines where the generator is much faster.
+func streamCoalesceWindow() time.Duration {
+	if raw := strings.TrimSpace(os.Getenv("FREERAG_STREAM_COALESCE_MS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return time.Duration(parsed) * time.Millisecond
+		}
+	}
+	return 0
+}
+
+// streamCoalesceMaxRunes bounds one coalesced frame; <=0 lets the window alone
+// decide when to flush.
+func streamCoalesceMaxRunes() int {
+	if raw := strings.TrimSpace(os.Getenv("FREERAG_STREAM_COALESCE_RUNES")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 // dataDir is the directory the knowledge-base registry and the per-base index
@@ -618,6 +856,39 @@ func (k *kernel) register(srv *ipc.Server) {
 		return reply, nil
 	})
 
+	// What this machine is actually running on, as opposed to what it offers.
+	//
+	// The gap between those two is why this exists: the shell can list a GPU,
+	// but an onnxruntime build without the matching provider resolves "auto" to
+	// CPU and says nothing about it. The session's own report is the only
+	// honest answer, so that is what is handed back.
+	srv.Register("hardware", func(_ context.Context, _ json.RawMessage) (any, *ipc.Error) {
+		k.deepdocMu.Lock()
+		report := k.deepdoc
+		k.deepdocMu.Unlock()
+
+		reply := map[string]any{}
+		if report == nil {
+			// Not warmed yet, or no sidecar: reported as such rather than
+			// filled in with what the platform would suggest.
+			reply["deepdoc"] = map[string]any{"warmed": false}
+		} else {
+			reply["deepdoc"] = map[string]any{
+				"warmed":    true,
+				"providers": report.Providers,
+				"layout":    report.Layout,
+				"tsr":       report.TSR,
+			}
+		}
+		// A startup decision, read the way the shell makes it: FREERAG_VLM is
+		// how the chart backend is asked for, and a service this kernel started
+		// is the same answer arriving by another route.
+		reply["chart"] = map[string]any{
+			"enabled": k.chartService != nil || os.Getenv("FREERAG_VLM") == "chart",
+		}
+		return reply, nil
+	})
+
 	srv.Register("parse", k.handleParse)
 	srv.Register("index", k.handleIndex)
 	// The batch form is asynchronous on purpose: Serve handles one request at a
@@ -644,6 +915,24 @@ func (k *kernel) register(srv *ipc.Server) {
 	srv.Register("page", k.handlePage)
 	srv.Register("forget", k.handleForget)
 	srv.Register("status", k.handleStatus)
+
+	// The tree channel: documents reduced to their own structure, searched
+	// without vectors (internal/tree). Separate methods rather than a flag on
+	// `search`, because the two return different things — `search` returns
+	// passages, `tree.search` returns passages WITH the section path that found
+	// them and the trace proving it.
+	srv.Register("tree.status", k.handleTreeStatus)
+	srv.Register("tree.index", k.handleTreeIndex)
+	srv.Register("tree.search", k.handleTreeSearch)
+
+	// The document-level channel: the corpus as a directory tree whose leaves
+	// are documents, routed one typed decision at a time (internal/dirtree).
+	// Named `fs.*` because that is what it is — a file system over the corpus —
+	// and because a caller that confuses it with `tree.*` would be asking for
+	// passages from a channel that never returns one.
+	srv.Register("fs.status", k.handleDirStatus)
+	srv.Register("fs.index", k.handleDirIndex)
+	srv.Register("fs.search", k.handleDirSearch)
 
 	// Knowledge bases. Listing never opens one; creating one only writes the
 	// registry, so an empty base costs a name rather than an index.
@@ -1003,6 +1292,7 @@ func (k *kernel) handleForget(_ context.Context, raw json.RawMessage) (any, *ipc
 			reply["save_error"] = saveErr.Error()
 		}
 		k.recordCounts(live)
+		k.forgetTree(live, docID)
 	}
 	return reply, nil
 }
@@ -1353,8 +1643,41 @@ func (k *kernel) indexOne(ctx context.Context, live *kbRuntime, params parsePara
 			reply["save_error"] = saveErr.Error()
 		}
 		k.recordCounts(live)
+		// The tree belongs to this document, so it is rebuilt here rather than
+		// on demand: a search that found no tree would silently fall back to flat
+		// BM25, and nothing in its answer would say so. A failure is reported in
+		// the reply for the same reason a failed index save is — otherwise the
+		// caller sees a successful index without this channel in it.
+		//
+		// A batch hands the documents in one at a time and saves once at the end
+		// (indexjob), because tree.json holds every document and writing it per
+		// file would make the last write of a hundred cost a hundred other
+		// documents' worth of bytes.
+		k.syncTree(live, docID, result.SourceFile, reply, gate == nil)
 	}
 	return reply, nil
+}
+
+// syncTree rebuilds one document's tree after its chunks changed.
+//
+// A failure never fails the index: the chunks are stored and answerable, and the
+// tree is an additional channel rather than a precondition for retrieval. It IS
+// reported in the reply, because a silent degradation here would look like the
+// tree channel having nothing to say when it actually has no tree.
+func (k *kernel) syncTree(live *kbRuntime, docID, sourceFile string, reply map[string]any, persist bool) {
+	count, err := k.rebuildTree(live, docID, sourceFile, persist)
+	if err != nil {
+		log.Printf("warning: could not rebuild the tree for %s: %v", docID, err)
+		reply["tree_error"] = err.Error()
+		return
+	}
+	reply["tree_chunks"] = count
+	if count > 0 {
+		if doc := live.trees.Tree(docID); doc != nil {
+			reply["tree_levels"] = doc.LevelsFrom
+			reply["tree_nodes"] = len(doc.Nodes)
+		}
+	}
 }
 
 // withKB labels a reply with the base it acted on, and its live index figures.
@@ -1460,6 +1783,11 @@ func (k *kernel) handleAsk(ctx context.Context, raw json.RawMessage) (any, *ipc.
 	// The flow routes the question and, on the complex path, fans out over
 	// sub-questions; the loop is the unit it runs. A base whose flow failed to
 	// build still answers through the single agentic pass.
+	//
+	// The stream sink is installed around the run and removed after it, so two
+	// concurrent questions cannot share one coalescer's buffer. When coalescing
+	// is off (the default) this is a no-op and the default sink is used.
+	endStream := k.beginAnswerStream(live)
 	var (
 		result *agent.Result
 		err    error
@@ -1469,6 +1797,7 @@ func (k *kernel) handleAsk(ctx context.Context, raw json.RawMessage) (any, *ipc.
 	} else {
 		result, err = live.loop.Run(ctx, params.Question)
 	}
+	endStream(result)
 	if err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeInternalError, Message: err.Error()}
 	}

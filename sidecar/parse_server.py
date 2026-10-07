@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
@@ -68,6 +69,11 @@ def _capabilities() -> Dict[str, Any]:
         import onnxruntime  # noqa: F401
 
         caps["onnxruntime"] = True
+        # Reported rather than inferred from the platform, because it is the
+        # answer to "will this machine be accelerated" and it is not derivable:
+        # the same macOS build resolves "auto" to CoreML here and to CPU on a
+        # machine whose onnxruntime lacks the provider, silently.
+        caps["onnx_providers"] = list(onnxruntime.get_available_providers())
     except Exception:
         pass
 
@@ -103,6 +109,44 @@ def method_ping(_params: Any) -> Any:
 
 def method_version(_params: Any) -> Any:
     return {"name": "freerag-parse-sidecar", "version": VERSION, "capabilities": _capabilities()}
+
+
+def method_warmup(_params: Any) -> Any:
+    """Build the deepdoc sessions now, and report what they landed on.
+
+    Two jobs, and both are the reason this method exists:
+
+    - The accelerated session is expensive to BUILD, not to use: measured here,
+      CoreML compiles 657 of the layout model's 681 nodes and takes 7.5 s,
+      against 0.05 s on CPU. Left alone that lands on whichever document is
+      parsed first, inside a step the UI has already announced — a wait that
+      reads as a hang rather than as a one-off. Building it here spends it at
+      startup, where nothing is waiting.
+    - It answers "what is this machine really running on" with the session's own
+      report instead of the platform's guess. `capabilities.onnx_providers` says
+      what the runtime offers; this says what the models actually got, which is
+      the number that matters and the one to log.
+
+    Serial by construction: one sidecar process, and the session registry builds
+    under its own lock, so a second caller waits rather than compiling twice.
+    """
+    from layout_onnx import LayoutDetector, default_providers
+    from tsr_onnx import TSRDetector
+
+    result: Dict[str, Any] = {"providers": default_providers()}
+    for name, detector in (("layout", LayoutDetector()), ("tsr", TSRDetector())):
+        entry: Dict[str, Any] = {"available": detector.available}
+        if detector.available:
+            # `provider_name` builds the session as a side effect, which is the
+            # work being paid for here; timing it is the whole measurement.
+            started = time.perf_counter()
+            try:
+                entry["provider"] = detector.provider_name
+                entry["seconds"] = round(time.perf_counter() - started, 2)
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                entry["error"] = str(exc)
+        result[name] = entry
+    return result
 
 
 def method_parse(params: Any) -> Any:
@@ -291,6 +335,7 @@ def method_render(params: Any) -> Any:
 METHODS = {
     "ping": method_ping,
     "version": method_version,
+    "warmup": method_warmup,
     "parse": method_parse,
     "decide": method_decide,
     "render": method_render,
