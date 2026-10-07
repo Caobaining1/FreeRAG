@@ -31,8 +31,8 @@ func toolStore(t *testing.T) *store.Store {
 
 func TestToolSpecsMatchTheSurface(t *testing.T) {
 	specs := ToolSpecs()
-	if len(specs) != 4 {
-		t.Fatalf("specs = %d, want 4", len(specs))
+	if len(specs) != len(ToolNames()) {
+		t.Fatalf("specs = %d, want one per tool (%d)", len(specs), len(ToolNames()))
 	}
 	names := ToolNames()
 	for index, spec := range specs {

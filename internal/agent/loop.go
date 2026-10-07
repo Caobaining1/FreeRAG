@@ -47,8 +47,11 @@ func Medium() Spec {
 		// fitting; the ceiling that matters is still SCAMaxRounds × this.
 		ActionMaxTurns:   12,
 		SnippetsPerQuery: 10,
-		// The four retrieval tools of §6.7: nothing that needs a compiled
-		// structure (no navigate_*, no graph_explore) and no web search.
+		// The retrieval tools of §6.7 plus the directory tree: nothing that
+		// needs a compiled structure (no navigate_*, no graph_explore) and no
+		// web search. dirtree_search is in the surface because it is a channel,
+		// not a structure — it walks the tree the corpus was filed into, and
+		// whether it applies is decided per knowledge base at call time.
 		Tools: ToolNames(),
 	}
 }
@@ -128,7 +131,13 @@ type Result struct {
 	// nothing is not the same statement as a corpus that has nothing.
 	MetadataScope  []string `json:"metadata_scope,omitempty"`
 	MetadataFilter string   `json:"metadata_filter,omitempty"`
-	Trace          []string `json:"trace"`
+	// PromptStats is what the answer prompt's evidence block cost, before and
+	// after the REFRAG-style selective compression of refrag.go. Present only
+	// when the run actually rendered a prompt, and non-trivial only when
+	// compression was on — a run that did not compress reports the same figure
+	// twice rather than a flattering ratio.
+	PromptStats *PromptStats `json:"prompt_stats,omitempty"`
+	Trace       []string     `json:"trace"`
 }
 
 // EvidenceIDs returns the chunk identities behind the answer, for citations.
@@ -167,6 +176,15 @@ type Loop struct {
 	// generator's context window — an oversized prompt is rejected, not
 	// truncated, by Ollama.
 	MaxPromptChars int
+
+	// Refrag selects how the evidence block is compressed before it is handed
+	// to the generator (refrag.go). The zero value is OFF, which is the
+	// baseline: the prompt text is then byte-identical to the pre-REFRAG one.
+	//
+	// A configuration, never a per-run counter: the loop holds no run state
+	// because the complex path COPIES a loop per sub-question (see
+	// Flow.fanoutNode), and a copied mutex is a lock nobody else can take.
+	Refrag RefragConfig
 
 	// OnStep, when set, receives every trace line as it is produced.
 	//
@@ -420,14 +438,36 @@ func (l *Loop) RunRetrieval(ctx context.Context, question string) (*Result, erro
 func (l *Loop) writeAnswer(ctx context.Context, question string, result *Result) {
 	l.step(&result.Trace, "[Answer] writing…")
 	started := time.Now()
+	// Local rather than a field on the loop: the loop is copied per sub-question
+	// on the complex path, so run state kept on it would be written to a copy.
+	var stats PromptStats
 	result.Answer = l.answer(ctx, question, result.Evidence, result.MetadataFilter,
-		RenderMemberRecord(question, result.Members))
+		RenderMemberRecord(question, result.Members), &stats)
+	// The prompt's cost is reported before the emptiness check below, because
+	// the interesting case is the run that compressed its evidence and then
+	// found it could not answer anyway — that ratio is still a fact about the
+	// run, and dropping it there would hide the failure behind the guard.
+	setPromptStatsOn(result, &stats)
 	if result.Answer == "" {
 		l.step(&result.Trace, "[Answer] not written: the run found no evidence to answer from.")
 		return
 	}
 	l.step(&result.Trace, fmt.Sprintf("[Answer] written in %s (%d char(s)).",
 		time.Since(started).Round(100*time.Millisecond), len([]rune(result.Answer))))
+}
+
+// setPromptStatsOn attaches stats and their trace line to a result.
+//
+// Shared by both paths — the simple one writes through the loop, the complex one
+// through the synthesis — so a run cannot report its evidence cost on one path
+// and not the other.
+func setPromptStatsOn(result *Result, stats *PromptStats) {
+	if result == nil || stats == nil || stats.Passages == 0 {
+		return
+	}
+	copied := *stats
+	result.PromptStats = &copied
+	result.Trace = append(result.Trace, copied.TraceLines()...)
 }
 
 // attempt is one tool call this run has already made, and what it returned.
@@ -496,8 +536,9 @@ func renderAttempts(attempts []attempt) string {
 const maxGrepLegs = 2
 
 // roundCalls builds one round's tool calls: a hybrid search per query, plus a
-// literal probe per missing term (docs/plan.md §6.7).
-func roundCalls(queries []string, missing []string) []ToolCall {
+// route down the directory tree when the corpus has one, plus a literal probe
+// per missing term (docs/plan.md §6.7).
+func roundCalls(queries []string, missing []string, dirTree DirTree) []ToolCall {
 	calls := make([]ToolCall, 0, len(queries)+maxGrepLegs)
 
 	for _, query := range queries {
@@ -509,6 +550,23 @@ func roundCalls(queries []string, missing []string) []ToolCall {
 			Name:      ToolHybridSearch,
 			Arguments: map[string]any{"query": query},
 		})
+	}
+
+	// The same reason buildCandidates offers it alongside rather than instead:
+	// this is the plan a run falls back to when no chooser and no model is
+	// available, and a plan whose only leg is a route into a folder that turns
+	// out to be the wrong one has no second leg.
+	if dirTree != nil && dirTree.Has() {
+		for _, query := range queries {
+			query = strings.TrimSpace(query)
+			if query == "" {
+				continue
+			}
+			calls = append(calls, ToolCall{
+				Name:      ToolDirSearch,
+				Arguments: map[string]any{"query": query},
+			})
+		}
 	}
 
 	for index, term := range missing {
@@ -638,7 +696,7 @@ func (l *Loop) planTools(
 	attempts []attempt,
 	trace *[]string,
 ) []ToolCall {
-	fallback := roundCalls(queries, missing)
+	fallback := roundCalls(queries, missing, l.toolbox().DirTree)
 
 	// Laya first when configured: it chooses among fully-formed candidate calls,
 	// so it is fast (~100 ms) and cannot invent a value the index does not hold.
@@ -646,7 +704,7 @@ func (l *Loop) planTools(
 	// deterministic fallback, because the model plan is still a better answer
 	// than the fixed roundCalls when it is available.
 	if l.Chooser != nil {
-		candidates := buildCandidates(queries, missing, evidence, attempts)
+		candidates := buildCandidates(queries, missing, evidence, attempts, l.toolbox().DirTree)
 		if len(candidates) == 0 {
 			l.step(trace, "[Action Session] no untried candidate call remains; stopping retrieval.")
 			return nil
@@ -900,11 +958,16 @@ func (l *Loop) generate(
 	onDelta func(string),
 	scopeNote string,
 	memberRecord string,
+	stats *PromptStats,
 ) string {
 	if l.Model != nil {
+		block, rendered := renderEvidenceWith(question, evidence, l.maxPromptChars(), memberRecord, l.Refrag)
+		if stats != nil {
+			*stats = rendered
+		}
 		messages := []Message{
 			{Role: RoleSystem, Content: answerSystemPrompt + answerLanguageDirective(l.spec().AnswerLanguage)},
-			{Role: RoleUser, Content: scopePrefix(scopeNote) + renderEvidence(question, evidence, l.maxPromptChars(), memberRecord)},
+			{Role: RoleUser, Content: scopePrefix(scopeNote) + block},
 		}
 
 		var (
@@ -920,6 +983,9 @@ func (l *Loop) generate(
 		if err != nil {
 			l.logf("[Answer] model call failed (%v); falling back to an extractive answer", err)
 		} else if reply != nil && strings.TrimSpace(reply.Content) != "" {
+			if stats != nil {
+				stats.Usage = reply.Usage
+			}
 			return truncateRunes(strings.TrimSpace(reply.Content), l.maxExtractiveAnswerChars())
 		}
 	}
@@ -949,6 +1015,7 @@ func (l *Loop) answer(
 	evidence []store.Hit,
 	scopeNote string,
 	memberRecord string,
+	stats *PromptStats,
 ) string {
 	if len(evidence) == 0 {
 		// Nothing to answer from. The caller reports that, in its own words: a
@@ -963,7 +1030,7 @@ func (l *Loop) answer(
 	if l.OnAnswerDelta != nil {
 		onDelta = l.OnAnswerDelta
 	}
-	return l.generate(ctx, question, evidence, onDelta, scopeNote, memberRecord)
+	return l.generate(ctx, question, evidence, onDelta, scopeNote, memberRecord, stats)
 }
 
 // scopePrefix tells the generator that the search was narrowed, so that "the
@@ -1072,13 +1139,33 @@ func (l *Loop) rewrite(ctx context.Context, question string, missing []string) [
 	return []string{question + " " + strings.Join(missing, " ")}
 }
 
-// renderEvidence renders the numbered evidence block for the answer prompt.
+// renderEvidence renders the numbered evidence block without compression.
+//
+// Kept as the uncompressed entry point so the pre-REFRAG prompt text stays
+// reachable — it is the baseline every compression measurement is taken
+// against, and a baseline with no caller is not a baseline.
+func renderEvidence(question string, evidence []store.Hit, maxChars int, extra string) string {
+	text, _ := renderEvidenceWith(question, evidence, maxChars, extra, RefragConfig{})
+	return text
+}
+
+// renderEvidenceWith renders the numbered evidence block for the answer prompt.
 //
 // maxChars bounds the block so the prompt fits the generator's context window.
 // Passages are added in rank order until the budget runs out; the last one is
 // trimmed mid-text rather than dropped, and the omission is stated so the model
 // knows the evidence was cut instead of silently reasoning over a partial list.
-func renderEvidence(question string, evidence []store.Hit, maxChars int, extra string) string {
+//
+// cfg applies the REFRAG-style selective compression (refrag.go): the
+// highest-ranked passages are expanded in full, the rest enter as a gist. Every
+// passage keeps its number, its position and its header, so a citation the
+// model writes still resolves — the compression changes how much of a passage
+// is present, not which passages exist.
+func renderEvidenceWith(question string, evidence []store.Hit, maxChars int, extra string, cfg RefragConfig) (string, PromptStats) {
+	cfg = cfg.normalized()
+	stats := PromptStats{Passages: len(evidence)}
+	expand := refragPlan(evidence, cfg)
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "Question: %s\n\n", question)
 
@@ -1094,8 +1181,8 @@ func renderEvidence(question string, evidence []store.Hit, maxChars int, extra s
 
 	kept := 0
 	for i, hit := range evidence {
-		header := fmt.Sprintf("[%d] (%s p.%d) ", i+1, hit.Chunk.DocID, hit.Chunk.PageNum)
-		text := collapse(strings.TrimSpace(hit.Chunk.Text))
+		header, text, raw := renderPassage(hit, i, expand[i], cfg, &stats)
+		stats.EvidenceCharsRaw += raw
 
 		if maxChars > 0 {
 			room := maxChars - b.Len() - len(header) - 1
@@ -1109,6 +1196,11 @@ func renderEvidence(question string, evidence []store.Hit, maxChars int, extra s
 			}
 		}
 		fmt.Fprintf(&b, "%s%s\n", header, text)
+		// Counted per passage, not as the builder's length: the builder also
+		// holds the question and the "Evidence:" scaffolding, so comparing the
+		// two would report a ratio below 1.0 for a prompt that was not
+		// compressed at all — the very comparison this number exists to make.
+		stats.EvidenceChars += len(text)
 		kept++
 	}
 
@@ -1116,7 +1208,7 @@ func renderEvidence(question string, evidence []store.Hit, maxChars int, extra s
 		fmt.Fprintf(&b, "\n(%d of %d passage(s) omitted to fit the context window.)\n",
 			len(evidence)-kept, len(evidence))
 	}
-	return b.String()
+	return b.String(), stats
 }
 
 // extractiveAnswer is the model-free answer: the top passages, quoted and cited.

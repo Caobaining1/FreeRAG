@@ -97,22 +97,48 @@ func (k *kernel) captionSettings() (visionSettings, bool) {
 	// Deliberately independent of the UI's vision toggle, which drives the
 	// sidecar's parse-time captioner. If this path also followed that toggle,
 	// one switch would turn on two captioners and every figure would be
-	// described twice and appended twice. FREERAG_VLM=go is the only way in.
-	if _, enabled := visionConfig(); !enabled {
+	// described twice and appended twice. FREERAG_VLM is the only way in, and
+	// it names which of the two Go-side describers runs.
+	env, enabled := visionConfig()
+	if !enabled {
 		return visionSettings{}, false
 	}
 
 	current := k.currentSettings()
-	if current.VisionModel == "" || current.VisionWorkers < 1 {
-		return visionSettings{}, false
-	}
 	settings := visionSettings{
+		Backend:   env.Backend,
+		Endpoint:  env.Endpoint,
 		Model:     current.VisionModel,
 		Workers:   current.VisionWorkers,
 		MaxTokens: current.VisionMaxTokens,
 		MaxSide:   current.VisionMaxSide,
 	}
-	if settings.MaxTokens < 0 || settings.MaxSide < 0 {
+	if env.Backend == chartBackend {
+		// Three of the four come from the environment for this backend, because
+		// the UI's values describe the Ollama path and are wrong here:
+		//
+		//   - the model name is an Ollama tag, which means nothing to a service
+		//     that was never given one;
+		//   - 4 workers is measured for four independent Ollama requests, and
+		//     wrong for one Python process decoding one chart at a time — it
+		//     would queue four deep and finish no sooner;
+		//   - the token ceiling is the service's own: below 768 the transcribed
+		//     tables come back half-written.
+		//
+		// MaxSide still comes from the UI: it is the crop's pixel size, which is
+		// a property of the figure and not of who describes it.
+		settings.Model = env.Model
+		settings.Workers = env.Workers
+		settings.MaxTokens = env.MaxTokens
+	}
+	if settings.Workers < 1 || settings.MaxTokens < 0 || settings.MaxSide < 0 {
+		return visionSettings{}, false
+	}
+	// Only the Ollama path needs a name: it resolves it through Ollama, and an
+	// empty one there means there is nothing to call. The chart path has its own
+	// model and its own default, so requiring a name here would disable a
+	// backend that is otherwise fully configured.
+	if env.Backend != chartBackend && strings.TrimSpace(settings.Model) == "" {
 		return visionSettings{}, false
 	}
 	return settings, true

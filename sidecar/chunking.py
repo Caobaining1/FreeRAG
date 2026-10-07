@@ -117,6 +117,12 @@ class Block:
     font_size: float = 0.0
     parent_section: str = ""
     source_file: str = ""
+    # level is the heading's depth in its own document, when the reader knew it:
+    # 3 for Markdown's "### x", 2 for Word's Heading2. 0 means unknown, which is
+    # what a PDF arrives with — those are ranked by font size instead. It is
+    # metadata about WHERE the title sits, not part of the text, and it is what
+    # lets a chunk become a node at the right depth rather than a flat title.
+    level: int = 0
 
     # Filled during consolidation.
     chunk_id: str = ""
@@ -147,6 +153,11 @@ class Block:
             meta["attached_to"] = self.attached_to
         if self.merged_from:
             meta["merged_from"] = list(self.merged_from)
+        # Emitted rather than dropped: the level never survives the text (the '###'
+        # is stripped long before here), and losing it means every heading in a
+        # Markdown or Word file arrives at the same depth.
+        if self.level:
+            meta["level"] = self.level
         meta["chars"] = len(self.render())
         return {"chunk_id": self.chunk_id, "text": self.render(), "metadata": meta}
 
@@ -251,6 +262,7 @@ def _combine(group: List[Block], block_type: str) -> Block:
         font_size=first.font_size,
         parent_section=first.parent_section,
         source_file=first.source_file,
+        level=first.level,
     )
     if block_type == "Section":
         # A Section is named by its own heading, which leads the group.
@@ -559,6 +571,7 @@ def _finalize(blocks: List[Block], max_chars: int) -> List[Block]:
                 source_file=block.source_file,
                 attached_to=block.attached_to,
                 merged_from=list(block.merged_from),
+                level=block.level,
             )
             copy.chunk_id = base_id if len(parts) == 1 else f"{base_id}p{part_index}"
             finalized.append(copy)

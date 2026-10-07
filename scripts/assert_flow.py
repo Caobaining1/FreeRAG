@@ -71,7 +71,13 @@ def main() -> int:
         f"verdict = {ask_result.get('verdict')}",
     )
     check(len(ask_result.get("evidence") or []) > 0, "ask gathered no evidence")
-    check(bool((ask_result.get("draft") or "").strip()), "ask produced no draft")
+    # `answer`, not `draft`. The field this checked was renamed when the loop
+    # stopped writing a per-round text for the checker to judge and started
+    # writing exactly one answer (internal/agent/loop.go, writeAnswer); the
+    # assertion kept looking for the old name and so failed on every run,
+    # including runs whose answer was fine. A suite that always reports one
+    # failure trains you to ignore failures.
+    check(bool((ask_result.get("answer") or "").strip()), "ask produced no answer")
     check(len(ask_result.get("trace") or []) > 0, "ask produced no trace")
 
     if failures:

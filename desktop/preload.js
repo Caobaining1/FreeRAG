@@ -50,6 +50,12 @@ contextBridge.exposeInMainWorld('freerag', {
   /** Returns the kernel process status: { running, binary }. */
   status: () => ipcRenderer.invoke('kernel-status'),
 
+  /** The cached hardware scan, scanning on first launch if there is none. */
+  hardware: () => ipcRenderer.invoke('hardware-load'),
+
+  /** Scans again and replaces the cache. For the button that asks for it. */
+  hardwareRescan: () => ipcRenderer.invoke('hardware-rescan'),
+
   /** Returns the kernel log lines emitted before this window existed. */
   logHistory: () => ipcRenderer.invoke('kernel-log-history'),
 

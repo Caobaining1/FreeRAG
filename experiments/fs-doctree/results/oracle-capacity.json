@@ -1,0 +1,229 @@
+{
+  "split": "eval/dev.json",
+  "questions": 24,
+  "budget": 8,
+  "max_leaves": 4,
+  "leaves": 59,
+  "in_some_leaf": 1.0,
+  "oracle_1": 0.5104,
+  "oracle_n": 1.0,
+  "mean_leaves_holding_gold": 2.29,
+  "per_question": [
+    {
+      "id": "q0027",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0076",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0085",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0090",
+      "type": "comparison_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.6666666666666666,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0092",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0145",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0149",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 1.0,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 1
+    },
+    {
+      "id": "q0211",
+      "type": "comparison_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0000",
+      "type": "inference_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0004",
+      "type": "inference_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0032",
+      "type": "inference_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0064",
+      "type": "inference_query",
+      "gold": 4,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.25,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 4
+    },
+    {
+      "id": "q0097",
+      "type": "inference_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 1.0,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 1
+    },
+    {
+      "id": "q0138",
+      "type": "inference_query",
+      "gold": 4,
+      "in_some_leaf": 1.0,
+      "oracle_1": 1.0,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 1
+    },
+    {
+      "id": "q0186",
+      "type": "inference_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0210",
+      "type": "inference_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0034",
+      "type": "temporal_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.6666666666666666,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0096",
+      "type": "temporal_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0117",
+      "type": "temporal_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0161",
+      "type": "temporal_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    },
+    {
+      "id": "q0184",
+      "type": "temporal_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0227",
+      "type": "temporal_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0232",
+      "type": "temporal_query",
+      "gold": 2,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.5,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 2
+    },
+    {
+      "id": "q0257",
+      "type": "temporal_query",
+      "gold": 3,
+      "in_some_leaf": 1.0,
+      "oracle_1": 0.3333333333333333,
+      "oracle_n": 1.0,
+      "leaves_holding_gold": 3
+    }
+  ]
+}

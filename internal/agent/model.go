@@ -37,6 +37,29 @@ type ToolCall struct {
 type Reply struct {
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// Usage is the generator's own account of the call, when it reports one.
+	//
+	// Expected to be absent: a model that does not report timings is not
+	// broken, and nothing in the loop branches on this. It exists because
+	// "cost = wall clock + generated tokens" is one half of the fitness
+	// function in docs/plan.md §13.1 and half of it was unmeasurable —
+	// wall clock is read off a clock, token counts were not reported at all,
+	// so a change could trade latency for quality (or the reverse) invisibly.
+	Usage *Usage `json:"usage,omitempty"`
+}
+
+// Usage is what one generator call cost, as the generator measured it.
+//
+// The split matters rather than the total: prompt tokens are what the evidence
+// block decides and output tokens are what the answer length decides, and a
+// single "elapsed" would leave the two indistinguishable — which is exactly how
+// a prompt-side change gets credited to, or blamed on, the wrong half.
+type Usage struct {
+	PromptTokens int `json:"prompt_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
+	// PromptNanos and OutputNanos are the generator's own timings.
+	PromptNanos int64 `json:"prompt_nanos,omitempty"`
+	OutputNanos int64 `json:"output_nanos,omitempty"`
 }
 
 // ToolSpec describes a tool the model may call.

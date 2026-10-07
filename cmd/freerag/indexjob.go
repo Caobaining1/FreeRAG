@@ -146,6 +146,11 @@ func (k *kernel) indexBatch(ctx context.Context, live *kbRuntime, paths []string
 	var done atomic.Int64
 	total := len(paths)
 
+	// The trees are saved once, here, rather than per document: tree.json holds
+	// every document in the base, so writing it after each file would re-serialize
+	// the documents already done, once per document still to come.
+	defer k.persistTrees(live)
+
 	outcomes := runBounded(ctx, paths, budget, func(ctx context.Context, index int, gate parseGate) indexOutcome {
 		path := paths[index]
 		file := filepath.Base(path)

@@ -225,9 +225,17 @@ class ProviderChoiceTest(unittest.TestCase):
         else:
             os.environ['FREERAG_ONNX_PROVIDERS'] = self.saved
 
-    def test_cpu_is_the_default(self):
+    def test_the_default_ends_on_cpu_so_inference_always_has_somewhere_to_run(self):
+        """The default is "auto": whatever this machine can provide, CPU last.
+
+        Asserted as "ends on CPU" rather than "is CPU" so the test holds on a
+        machine with an accelerator and on one without — the same property the
+        setting is for.
+        """
         os.environ.pop('FREERAG_ONNX_PROVIDERS', None)
-        self.assertEqual(default_providers(), ['CPUExecutionProvider'])
+        providers = default_providers()
+        self.assertTrue(providers)
+        self.assertEqual(providers[-1], 'CPUExecutionProvider')
 
     def test_auto_puts_cpu_last_so_inference_still_has_somewhere_to_run(self):
         os.environ['FREERAG_ONNX_PROVIDERS'] = 'auto'

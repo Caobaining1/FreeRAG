@@ -55,7 +55,11 @@ DEFAULT_LIMIT_BYTES = 256 * 1024 * 1024
 #:    yields different Figure chunks when that is enabled. The model name is
 #:    part of the key (two models are two different caption texts), and a version
 #:    bump is needed regardless because a version-9 entry has no description.
-CACHE_VERSION = "11"
+#: 11: every block now carries the largest glyph size inside it, so headings
+#:    parsed through PP-DocLayout keep their font size and the tree builder can
+#:    rank heading levels. Version 11 entries have font_size 0 on every heading,
+#:    which the tree builder reads as a document with no hierarchy at all.
+CACHE_VERSION = "12"
 
 
 def cache_dir() -> str:

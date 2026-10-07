@@ -41,7 +41,21 @@ type OllamaModel struct {
 	NumCtx int
 	// NumPredict caps generated tokens per call; <=0 uses the server default.
 	NumPredict int
-	// Temperature; <=0 uses the server default.
+	// Temperature is the sampler temperature; NEGATIVE leaves the server
+	// default.
+	//
+	// It used to be "<= 0 leaves the server default", which silently discarded
+	// the one value that mattered most: 0. Measurement runs set
+	// FREERAG_GENERATION_TEMPERATURE=0 precisely to remove the sampler as a
+	// variance source (docs/plan.md §13.17), and they got Ollama's default 0.8
+	// instead — so the loop planned different queries from one run to the next
+	// and the evidence pool swung between 44k and 72k characters for the SAME
+	// question (measured; docs/performance.md §10.3). A "temperature 0" that
+	// does not reach the server is worse than no switch at all, because the
+	// runs are then reported as reproducible.
+	//
+	// The zero value therefore means greedy, not "unset": a caller that wants
+	// the server default asks for it with a negative value.
 	Temperature float64
 	// Think controls Qwen3's reasoning mode; nil leaves the model's default.
 	//
@@ -216,6 +230,12 @@ type ollamaChatResponse struct {
 	Message ollamaMessage `json:"message"`
 	Error   string        `json:"error"`
 	Done    bool          `json:"done"`
+	// Ollama's own accounting for the call. Counts and durations arrive on the
+	// final chunk; the durations are nanoseconds.
+	PromptEvalCount    int   `json:"prompt_eval_count"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalCount          int   `json:"eval_count"`
+	EvalDuration       int64 `json:"eval_duration"`
 }
 
 // decodeArguments accepts either an object or a JSON-encoded string of one.
@@ -311,7 +331,7 @@ func (m *OllamaModel) complete(
 	if m.NumPredict > 0 {
 		options["num_predict"] = m.NumPredict
 	}
-	if m.Temperature > 0 {
+	if m.Temperature >= 0 {
 		options["temperature"] = m.Temperature
 	}
 
@@ -352,6 +372,7 @@ func (m *OllamaModel) complete(
 		content strings.Builder
 		calls   []ToolCall
 		filter  thinkFilter
+		usage   Usage
 	)
 	// The ceiling is a safety net rather than a limit on the answer: num_predict
 	// already bounds generation, and this only stops a misbehaving server from
@@ -377,6 +398,21 @@ func (m *OllamaModel) complete(
 			}
 		}
 		calls = append(calls, decodeToolCalls(chunk.Message.ToolCalls)...)
+		// Taken rather than summed: Ollama repeats the running totals on every
+		// chunk, so adding them would multiply the count by the chunk count. A
+		// non-streamed reply reports them exactly once, which this also covers.
+		if chunk.PromptEvalCount > 0 {
+			usage.PromptTokens = chunk.PromptEvalCount
+		}
+		if chunk.PromptEvalDuration > 0 {
+			usage.PromptNanos = chunk.PromptEvalDuration
+		}
+		if chunk.EvalCount > 0 {
+			usage.OutputTokens = chunk.EvalCount
+		}
+		if chunk.EvalDuration > 0 {
+			usage.OutputNanos = chunk.EvalDuration
+		}
 
 		if stream && chunk.Done {
 			// Returned on the done marker rather than at EOF so a server that
@@ -396,7 +432,11 @@ func (m *OllamaModel) complete(
 	// StripThink still runs over the whole reply. The filter above already keeps
 	// reasoning out of the deltas, but the Reply is what the checker reads, and
 	// it must not depend on the filter having seen every byte.
-	return &Reply{Content: StripThink(content.String()), ToolCalls: calls}, nil
+	reply := &Reply{Content: StripThink(content.String()), ToolCalls: calls}
+	if usage != (Usage{}) {
+		reply.Usage = &usage
+	}
+	return reply, nil
 }
 
 // decodeToolCalls drops calls the loop could never dispatch.

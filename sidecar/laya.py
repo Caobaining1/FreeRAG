@@ -376,8 +376,14 @@ class LayaDecider:
                 with open(config_path, encoding="utf-8") as handle:
                     self._config = json.load(handle)
 
-            # CPU by default: see DEFAULT_CPU_THREADS — an accelerator costs more
-            # in per-call graph upload than it saves on a handful of tokens.
+            # CPU by default, and measured rather than assumed: one decision
+            # costs 26 ms on CPU against 407 ms on CoreML on this machine — 15x
+            # slower — because a call this small pays the per-call graph upload
+            # and gets nothing back for it. CoreML also spends 13.6 s compiling
+            # to CPU's 1.15 s. Both providers return the same choice, so this is
+            # purely about time. Do not "optimise" it without re-measuring:
+            # layout_onnx went the other way (7.6x faster on CoreML) and the two
+            # models are not the same shape of work.
             providers = self.providers or ["CPUExecutionProvider"]
             # The session is registered per PROCESS, not per instance, and built
             # under that registry's own lock (layout_onnx.session_for). Two

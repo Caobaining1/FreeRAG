@@ -853,24 +853,27 @@ func TestSearchValidatesAndReturnsHits(t *testing.T) {
 	}
 }
 
-func TestToolsListsTheFourToolSurface(t *testing.T) {
+func TestToolsListsTheToolSurface(t *testing.T) {
 	payload := result(t, call(t, newTestKernel(t), `{"jsonrpc":"2.0","id":1,"method":"tools"}`))
 
 	if payload["mode"] != "medium" {
 		t.Fatalf("mode = %#v", payload["mode"])
 	}
+	// The four of §6.7 plus dirtree_search, which is a channel rather than a
+	// structure: whether it applies is a property of the knowledge base, asked
+	// at call time, so it is advertised like any other tool.
+	want := []string{"hybrid_search", "grep_search", "dirtree_search", "list_chunks", "metadata_search"}
 	names, ok := payload["names"].([]any)
-	if !ok || len(names) != 4 {
-		t.Fatalf("names = %#v, want the four tools", payload["names"])
+	if !ok || len(names) != len(want) {
+		t.Fatalf("names = %#v, want %v", payload["names"], want)
 	}
-	want := []string{"hybrid_search", "grep_search", "list_chunks", "metadata_search"}
 	for index, name := range names {
 		if name != want[index] {
 			t.Fatalf("names[%d] = %v, want %s", index, name, want[index])
 		}
 	}
 	specs, ok := payload["tools"].([]any)
-	if !ok || len(specs) != 4 {
+	if !ok || len(specs) != len(want) {
 		t.Fatalf("tools = %#v", payload["tools"])
 	}
 }

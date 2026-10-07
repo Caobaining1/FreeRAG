@@ -48,6 +48,32 @@ def _max_span_size(block: Dict[str, Any]) -> float:
     )
 
 
+def _max_size_in_bbox(page_dict: Dict[str, Any], bbox: Sequence[float]) -> float:
+    """Largest glyph size among the text blocks that lie inside one region.
+
+    The layout detector says a region is a title; the font size says how big the
+    letters in it actually were. Without this the ONNX path emits headings with
+    no size at all, and every PDF parsed through it arrives at the tree builder
+    flat — heading levels that the document plainly has, silently gone.
+    """
+    best = 0.0
+    for block in page_dict.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        block_bbox = block.get("bbox")
+        if not block_bbox:
+            continue
+        # Half the block's area inside the region counts as belonging to it: a
+        # title region bounded mid-line by the detector is still the title's own
+        # block, while a body paragraph merely touching the region is not.
+        if _overlap_ratio(tuple(block_bbox), tuple(bbox)) < 0.5:
+            continue
+        size = _max_span_size(block)
+        if size > best:
+            best = size
+    return best
+
+
 def _overlap_ratio(bbox: Sequence[float], outer: Sequence[float]) -> float:
     """Fraction of ``bbox``'s area that lies inside ``outer``."""
     width = float(bbox[2]) - float(bbox[0])
@@ -228,6 +254,7 @@ def detect_blocks_layout(
 
     detector = detector if detector is not None else LayoutDetector()
     tables = _page_tables(page)
+    page_dict = page.get_text("dict")
 
     blocks: List[Block] = []
     for region in detector.detect_page(page, dpi=dpi):
@@ -255,6 +282,7 @@ def detect_blocks_layout(
                 page_num=page_num,
                 block_type=region["block_type"],
                 bbox=bbox,
+                font_size=round(_max_size_in_bbox(page_dict, bbox), 1),
                 source_file=source_file,
             )
         )

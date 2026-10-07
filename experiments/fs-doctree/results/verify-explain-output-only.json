@@ -1,0 +1,1097 @@
+{
+ "split": "eval/dev.json",
+ "kb": "/Users/cbn/workspace/freerag/eval/data-v12",
+ "n_questions": 24,
+ "channels": {
+  "fs-br4-kw": {
+   "8": {
+    "doc_recall": 0.8542,
+    "fact_recall": 0.9653,
+    "doc_recall_by_type": {
+     "comparison_query": 0.8958,
+     "inference_query": 0.8542,
+     "temporal_query": 0.8125
+    },
+    "questions_missing_all": 0,
+    "median_seconds": 0.325,
+    "questions_complete": 15
+   }
+  },
+  "fs-br4-kw-explain": {
+   "8": {
+    "doc_recall": 0.8542,
+    "fact_recall": 0.9653,
+    "doc_recall_by_type": {
+     "comparison_query": 0.8958,
+     "inference_query": 0.8542,
+     "temporal_query": 0.8125
+    },
+    "questions_missing_all": 0,
+    "median_seconds": 0.39,
+    "questions_complete": 15
+   }
+  }
+ },
+ "per_question": {
+  "fs-br4-kw": [
+   {
+    "id": "q0027",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "b862496401_Amazon_brings_conversational_AI_to_kids.pdf",
+     "f18d5b9f76_Meta_turned_a_blind_eye_to_kids_on_its_p.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "c5dbacc35e_Hitting_the_Books_We_are_the_frogs_in_th.pdf"
+    ],
+    "seconds": 0.52,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0076",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "3255c23fe8_These_Are_Our_Favorite_Walmart_Cyber_Mon.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf",
+     "c5dbacc35e_Hitting_the_Books_We_are_the_frogs_in_th.pdf",
+     "007c971e75_The_best_Prime_Day_smart_home_deals.pdf",
+     "ec783ffa1a_Latin_artists_have_been_paving_the_way_f.pdf",
+     "9519be55e7_The_best_controllers_for_PC_gaming.pdf",
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf"
+    ],
+    "seconds": 0.33,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0085",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "2b2d46695f_A_timeline_of_Sam_Altmans_firing_from_Op.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "0626cb0683_Early_impressions_of_Googles_Gemini_aren.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "1173a48c68_How_ego_and_fear_fuelled_the_rise_of_art.pdf",
+     "1324923e87_Sam_Altman_ousted_as_OpenAIs_CEO.pdf",
+     "6319b5d410_How_the_OpenAI_fiasco_could_bolster_Meta.pdf"
+    ],
+    "seconds": 0.31,
+    "doc_recall_at": {
+     "8": 0.5
+    },
+    "fact_recall_at": {
+     "8": 0.5
+    }
+   },
+   {
+    "id": "q0090",
+    "type": "comparison_query",
+    "gold": 3,
+    "docs": [
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "6ec0843226_Sweeping_White_House_AI_executive_order.pdf",
+     "3255c23fe8_These_Are_Our_Favorite_Walmart_Cyber_Mon.pdf",
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf",
+     "7cf0808815_Epic_v_Google_explained.pdf",
+     "25b4fe765f_What_to_know_about_Fortnite_maker_Epic_G.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf"
+    ],
+    "seconds": 0.32,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0092",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "799c33ab24_WebSummit_derailed_by_founders_public_fi.pdf",
+     "702442c333_EU_fires_urgent_warning_at_Elon_Musks_X.pdf",
+     "d1fa80f8d9_039Massive_intel_failure_by_Mossad039_Ha.pdf",
+     "a07095fcf5_Gen_Z_just_saw_the_worst_war_in_Israel_i.pdf",
+     "c5dbacc35e_Hitting_the_Books_We_are_the_frogs_in_th.pdf",
+     "0fbd5681d3_Israels_blockade_of_Gaza_means_that_a_re.pdf",
+     "30f78d74f1_Meta_says_its_prioritizing_livestreaming.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf"
+    ],
+    "seconds": 0.46,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0145",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "53dc1f5db9_NBL_Round_5_Harvey_hits_Hail_Mary_for_Ha.pdf",
+     "9b13b99595_Line_Shopping_in_Sports_Betting_-_How_to.pdf",
+     "0fbd5681d3_Israels_blockade_of_Gaza_means_that_a_re.pdf",
+     "764a5264ed_2023_Kentucky_online_sports_betting_site.pdf",
+     "cd570d2e1b_New_Alzheimers_drugs_bring_hope_of_slowi.pdf",
+     "6f89e9c191_NBL_Round_4_Creek_pours_in_points_as_Pho.pdf",
+     "28ea384668_World_Series_2023_live_score_Rangers_vs.pdf",
+     "ac5ec0dfb7_Which_MLB_Playoff_Team_Has_the_Most_Daun.pdf"
+    ],
+    "seconds": 0.45,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0149",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "6ec0843226_Sweeping_White_House_AI_executive_order.pdf",
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "de42e05565_The_US_Senate_and_Silicon_Valley_reconve.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "5316372ed3_8_predictions_for_AI_in_2024.pdf"
+    ],
+    "seconds": 0.51,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0211",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "2cdcdb3634_Arnold_Schwarzenegger_Reese_Witherspoon.pdf",
+     "9519be55e7_The_best_controllers_for_PC_gaming.pdf",
+     "3ff786b1f5_Is_Google_Search_better_than_the_rest_An.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "c81a2d1614_Sarah_Michelle_Gellar_hits_out_at_Roblox.pdf",
+     "eeb8dce8eb_Taylor_Swift_reveals_secret_start_to_her.pdf",
+     "16056085ea_Travis_Kelce_faces_backlash_after_commen.pdf"
+    ],
+    "seconds": 0.56,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0000",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "c8c65a19f7_The_FTX_trial_is_bigger_than_Sam_Bankman.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "d1038f43de_Sam_Bankman-Fried_didnt_ask_where_the_8.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf"
+    ],
+    "seconds": 0.27,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0004",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "27d790af91_Vermont_Sportsbook_Promos_and_Sports_Bet.pdf",
+     "e2744d810c_NBA_Rookie_of_the_Year_Odds_-_Wembanyama.pdf",
+     "764a5264ed_2023_Kentucky_online_sports_betting_site.pdf",
+     "a5c5f6746b_NBA_Prop_Bets_-_Best_Team_and_Player_Pro.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "9b13b99595_Line_Shopping_in_Sports_Betting_-_How_to.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "eed3a41d62_The_restaurant_nearest_Google.pdf"
+    ],
+    "seconds": 0.19,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0032",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "aab4771ad5_OpenAIs_ex-chairman_accuses_board_of_goi.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "0626cb0683_Early_impressions_of_Googles_Gemini_aren.pdf",
+     "1324923e87_Sam_Altman_ousted_as_OpenAIs_CEO.pdf",
+     "2b2d46695f_A_timeline_of_Sam_Altmans_firing_from_Op.pdf",
+     "4d071727a4_WTF_is_going_on_at_OpenAI_We_have_theori.pdf"
+    ],
+    "seconds": 0.46,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0064",
+    "type": "inference_query",
+    "gold": 4,
+    "docs": [
+     "6e11d3cd52_Is_Sam_Bankman-Fried_a_bad_man_or_a_good.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf"
+    ],
+    "seconds": 0.51,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0097",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "eed3a41d62_The_restaurant_nearest_Google.pdf",
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "25b4fe765f_What_to_know_about_Fortnite_maker_Epic_G.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf"
+    ],
+    "seconds": 0.39,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 0.6666666666666666
+    }
+   },
+   {
+    "id": "q0138",
+    "type": "inference_query",
+    "gold": 4,
+    "docs": [
+     "b9e1c171a3_ASX_to_rise_after_interest_rate_hopes_bo.pdf",
+     "ec783ffa1a_Latin_artists_have_been_paving_the_way_f.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "6ec0843226_Sweeping_White_House_AI_executive_order.pdf",
+     "8431253295_ASX_set_for_bright_start_despite_Wall_St.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "1173a48c68_How_ego_and_fear_fuelled_the_rise_of_art.pdf",
+     "6319b5d410_How_the_OpenAI_fiasco_could_bolster_Meta.pdf"
+    ],
+    "seconds": 0.2,
+    "doc_recall_at": {
+     "8": 0.5
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0186",
+    "type": "inference_query",
+    "gold": 2,
+    "docs": [
+     "32ca38e94f_THE_GREATEST_Boks_beat_All_Blacks_in_ins.pdf",
+     "1e6ff3e9c7_How_the_conspiracy-fueled_Epoch_Times_we.pdf",
+     "ef4074a573_How_Did_the_Houston_Astros_Cheat_in_2017.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "b2ddea91bb_It_happens_All_Blacks_defend_star_centre.pdf",
+     "c82f43bcf4_Legacy_vs_ego_The_Springboks_are_playing.pdf",
+     "53dc1f5db9_NBL_Round_5_Harvey_hits_Hail_Mary_for_Ha.pdf"
+    ],
+    "seconds": 0.33,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0210",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "6e11d3cd52_Is_Sam_Bankman-Fried_a_bad_man_or_a_good.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf"
+    ],
+    "seconds": 0.32,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0034",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "0626cb0683_Early_impressions_of_Googles_Gemini_aren.pdf",
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf",
+     "25b4fe765f_What_to_know_about_Fortnite_maker_Epic_G.pdf"
+    ],
+    "seconds": 0.2,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0096",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "457f8d7098_SBF_riding_high_on_FTX_reportedly_offere.pdf"
+    ],
+    "seconds": 1.69,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0117",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "eeb8dce8eb_Taylor_Swift_reveals_secret_start_to_her.pdf",
+     "ccf3551800_A_scientist_reckons_with_climate_grief.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "1e6ff3e9c7_How_the_conspiracy-fueled_Epoch_Times_we.pdf",
+     "65a23c497a_Travis_Kelce_says_he_tried_to_delete_his.pdf",
+     "76fc19416a_Taylor_Swift_is_Times_Person_of_the_Year.pdf",
+     "16056085ea_Travis_Kelce_faces_backlash_after_commen.pdf",
+     "0af9bd1848_Taylor_Swift-Travis_Kelce_timeline_Every.pdf"
+    ],
+    "seconds": 0.26,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0161",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "30f78d74f1_Meta_says_its_prioritizing_livestreaming.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "c8c65a19f7_The_FTX_trial_is_bigger_than_Sam_Bankman.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf"
+    ],
+    "seconds": 0.21,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0184",
+    "type": "temporal_query",
+    "gold": 2,
+    "docs": [
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "a07095fcf5_Gen_Z_just_saw_the_worst_war_in_Israel_i.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "171437411c_The_jury_finally_hears_from_Sam_Bankman-.pdf",
+     "6e11d3cd52_Is_Sam_Bankman-Fried_a_bad_man_or_a_good.pdf"
+    ],
+    "seconds": 0.23,
+    "doc_recall_at": {
+     "8": 0.5
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0227",
+    "type": "temporal_query",
+    "gold": 2,
+    "docs": [
+     "d1fa80f8d9_039Massive_intel_failure_by_Mossad039_Ha.pdf",
+     "0fbd5681d3_Israels_blockade_of_Gaza_means_that_a_re.pdf",
+     "702442c333_EU_fires_urgent_warning_at_Elon_Musks_X.pdf",
+     "a07095fcf5_Gen_Z_just_saw_the_worst_war_in_Israel_i.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "30f78d74f1_Meta_says_its_prioritizing_livestreaming.pdf",
+     "799c33ab24_WebSummit_derailed_by_founders_public_fi.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf"
+    ],
+    "seconds": 0.2,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0232",
+    "type": "temporal_query",
+    "gold": 2,
+    "docs": [
+     "0d67b78c47_Steam_Deck_OLED_review_Its_just_better.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf",
+     "883a73e0be_Bears_vs_Panthers_live_score_updates_hig.pdf",
+     "2b2d46695f_A_timeline_of_Sam_Altmans_firing_from_Op.pdf",
+     "fc2b434587_Teenage_Engineerings_KO_II_sampler_prove.pdf",
+     "28a2838981_The_Steam_Deck_OLED_improves_much_more_t.pdf",
+     "18d1a1d2a8_The_best_October_Prime_Day_gaming_deals.pdf",
+     "9519be55e7_The_best_controllers_for_PC_gaming.pdf"
+    ],
+    "seconds": 0.3,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0257",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "eeb8dce8eb_Taylor_Swift_reveals_secret_start_to_her.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "65a23c497a_Travis_Kelce_says_he_tried_to_delete_his.pdf",
+     "76fc19416a_Taylor_Swift_is_Times_Person_of_the_Year.pdf",
+     "0af9bd1848_Taylor_Swift-Travis_Kelce_timeline_Every.pdf",
+     "16056085ea_Travis_Kelce_faces_backlash_after_commen.pdf"
+    ],
+    "seconds": 0.56,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   }
+  ],
+  "fs-br4-kw-explain": [
+   {
+    "id": "q0027",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "b862496401_Amazon_brings_conversational_AI_to_kids.pdf",
+     "f18d5b9f76_Meta_turned_a_blind_eye_to_kids_on_its_p.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "c5dbacc35e_Hitting_the_Books_We_are_the_frogs_in_th.pdf"
+    ],
+    "seconds": 0.39,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0076",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "3255c23fe8_These_Are_Our_Favorite_Walmart_Cyber_Mon.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf",
+     "c5dbacc35e_Hitting_the_Books_We_are_the_frogs_in_th.pdf",
+     "007c971e75_The_best_Prime_Day_smart_home_deals.pdf",
+     "ec783ffa1a_Latin_artists_have_been_paving_the_way_f.pdf",
+     "9519be55e7_The_best_controllers_for_PC_gaming.pdf",
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf"
+    ],
+    "seconds": 0.37,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0085",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "2b2d46695f_A_timeline_of_Sam_Altmans_firing_from_Op.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "0626cb0683_Early_impressions_of_Googles_Gemini_aren.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "1173a48c68_How_ego_and_fear_fuelled_the_rise_of_art.pdf",
+     "1324923e87_Sam_Altman_ousted_as_OpenAIs_CEO.pdf",
+     "6319b5d410_How_the_OpenAI_fiasco_could_bolster_Meta.pdf"
+    ],
+    "seconds": 0.39,
+    "doc_recall_at": {
+     "8": 0.5
+    },
+    "fact_recall_at": {
+     "8": 0.5
+    }
+   },
+   {
+    "id": "q0090",
+    "type": "comparison_query",
+    "gold": 3,
+    "docs": [
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "6ec0843226_Sweeping_White_House_AI_executive_order.pdf",
+     "3255c23fe8_These_Are_Our_Favorite_Walmart_Cyber_Mon.pdf",
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf",
+     "7cf0808815_Epic_v_Google_explained.pdf",
+     "25b4fe765f_What_to_know_about_Fortnite_maker_Epic_G.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf"
+    ],
+    "seconds": 0.57,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0092",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "799c33ab24_WebSummit_derailed_by_founders_public_fi.pdf",
+     "702442c333_EU_fires_urgent_warning_at_Elon_Musks_X.pdf",
+     "d1fa80f8d9_039Massive_intel_failure_by_Mossad039_Ha.pdf",
+     "a07095fcf5_Gen_Z_just_saw_the_worst_war_in_Israel_i.pdf",
+     "c5dbacc35e_Hitting_the_Books_We_are_the_frogs_in_th.pdf",
+     "0fbd5681d3_Israels_blockade_of_Gaza_means_that_a_re.pdf",
+     "30f78d74f1_Meta_says_its_prioritizing_livestreaming.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf"
+    ],
+    "seconds": 0.27,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0145",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "53dc1f5db9_NBL_Round_5_Harvey_hits_Hail_Mary_for_Ha.pdf",
+     "9b13b99595_Line_Shopping_in_Sports_Betting_-_How_to.pdf",
+     "0fbd5681d3_Israels_blockade_of_Gaza_means_that_a_re.pdf",
+     "764a5264ed_2023_Kentucky_online_sports_betting_site.pdf",
+     "cd570d2e1b_New_Alzheimers_drugs_bring_hope_of_slowi.pdf",
+     "6f89e9c191_NBL_Round_4_Creek_pours_in_points_as_Pho.pdf",
+     "28ea384668_World_Series_2023_live_score_Rangers_vs.pdf",
+     "ac5ec0dfb7_Which_MLB_Playoff_Team_Has_the_Most_Daun.pdf"
+    ],
+    "seconds": 0.49,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0149",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "6ec0843226_Sweeping_White_House_AI_executive_order.pdf",
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "de42e05565_The_US_Senate_and_Silicon_Valley_reconve.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "5316372ed3_8_predictions_for_AI_in_2024.pdf"
+    ],
+    "seconds": 0.82,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0211",
+    "type": "comparison_query",
+    "gold": 2,
+    "docs": [
+     "2cdcdb3634_Arnold_Schwarzenegger_Reese_Witherspoon.pdf",
+     "9519be55e7_The_best_controllers_for_PC_gaming.pdf",
+     "3ff786b1f5_Is_Google_Search_better_than_the_rest_An.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "c81a2d1614_Sarah_Michelle_Gellar_hits_out_at_Roblox.pdf",
+     "eeb8dce8eb_Taylor_Swift_reveals_secret_start_to_her.pdf",
+     "16056085ea_Travis_Kelce_faces_backlash_after_commen.pdf"
+    ],
+    "seconds": 0.48,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0000",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "c8c65a19f7_The_FTX_trial_is_bigger_than_Sam_Bankman.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "d1038f43de_Sam_Bankman-Fried_didnt_ask_where_the_8.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf"
+    ],
+    "seconds": 0.22,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0004",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "27d790af91_Vermont_Sportsbook_Promos_and_Sports_Bet.pdf",
+     "e2744d810c_NBA_Rookie_of_the_Year_Odds_-_Wembanyama.pdf",
+     "764a5264ed_2023_Kentucky_online_sports_betting_site.pdf",
+     "a5c5f6746b_NBA_Prop_Bets_-_Best_Team_and_Player_Pro.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "9b13b99595_Line_Shopping_in_Sports_Betting_-_How_to.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "eed3a41d62_The_restaurant_nearest_Google.pdf"
+    ],
+    "seconds": 0.8,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0032",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "aab4771ad5_OpenAIs_ex-chairman_accuses_board_of_goi.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "0626cb0683_Early_impressions_of_Googles_Gemini_aren.pdf",
+     "1324923e87_Sam_Altman_ousted_as_OpenAIs_CEO.pdf",
+     "2b2d46695f_A_timeline_of_Sam_Altmans_firing_from_Op.pdf",
+     "4d071727a4_WTF_is_going_on_at_OpenAI_We_have_theori.pdf"
+    ],
+    "seconds": 0.25,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0064",
+    "type": "inference_query",
+    "gold": 4,
+    "docs": [
+     "6e11d3cd52_Is_Sam_Bankman-Fried_a_bad_man_or_a_good.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf"
+    ],
+    "seconds": 0.93,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0097",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "eed3a41d62_The_restaurant_nearest_Google.pdf",
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "25b4fe765f_What_to_know_about_Fortnite_maker_Epic_G.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf"
+    ],
+    "seconds": 0.73,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 0.6666666666666666
+    }
+   },
+   {
+    "id": "q0138",
+    "type": "inference_query",
+    "gold": 4,
+    "docs": [
+     "b9e1c171a3_ASX_to_rise_after_interest_rate_hopes_bo.pdf",
+     "ec783ffa1a_Latin_artists_have_been_paving_the_way_f.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "6ec0843226_Sweeping_White_House_AI_executive_order.pdf",
+     "8431253295_ASX_set_for_bright_start_despite_Wall_St.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "1173a48c68_How_ego_and_fear_fuelled_the_rise_of_art.pdf",
+     "6319b5d410_How_the_OpenAI_fiasco_could_bolster_Meta.pdf"
+    ],
+    "seconds": 0.28,
+    "doc_recall_at": {
+     "8": 0.5
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0186",
+    "type": "inference_query",
+    "gold": 2,
+    "docs": [
+     "32ca38e94f_THE_GREATEST_Boks_beat_All_Blacks_in_ins.pdf",
+     "1e6ff3e9c7_How_the_conspiracy-fueled_Epoch_Times_we.pdf",
+     "ef4074a573_How_Did_the_Houston_Astros_Cheat_in_2017.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "b2ddea91bb_It_happens_All_Blacks_defend_star_centre.pdf",
+     "c82f43bcf4_Legacy_vs_ego_The_Springboks_are_playing.pdf",
+     "53dc1f5db9_NBL_Round_5_Harvey_hits_Hail_Mary_for_Ha.pdf"
+    ],
+    "seconds": 0.52,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0210",
+    "type": "inference_query",
+    "gold": 3,
+    "docs": [
+     "6e11d3cd52_Is_Sam_Bankman-Fried_a_bad_man_or_a_good.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "5448debfd3_Google_fakes_an_AI_demo_Grand_Theft_Auto.pdf",
+     "4f01dc2ef8_Mass_breach_of_privacy_TikTok_under_fire.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf"
+    ],
+    "seconds": 0.27,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0034",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "ee7af3fb5d_5_things_we_learned_so_far_about_the_Goo.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "fc75957184_The_people_who_ruined_the_internet.pdf",
+     "0626cb0683_Early_impressions_of_Googles_Gemini_aren.pdf",
+     "3a3497d540_News_publisher_files_class_action_antitr.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf",
+     "25b4fe765f_What_to_know_about_Fortnite_maker_Epic_G.pdf"
+    ],
+    "seconds": 0.24,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0096",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "2c1587e103_SBF_Trial_The_latest_updates_from_the_FT.pdf",
+     "457f8d7098_SBF_riding_high_on_FTX_reportedly_offere.pdf"
+    ],
+    "seconds": 0.29,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0117",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "eeb8dce8eb_Taylor_Swift_reveals_secret_start_to_her.pdf",
+     "ccf3551800_A_scientist_reckons_with_climate_grief.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "1e6ff3e9c7_How_the_conspiracy-fueled_Epoch_Times_we.pdf",
+     "65a23c497a_Travis_Kelce_says_he_tried_to_delete_his.pdf",
+     "76fc19416a_Taylor_Swift_is_Times_Person_of_the_Year.pdf",
+     "16056085ea_Travis_Kelce_faces_backlash_after_commen.pdf",
+     "0af9bd1848_Taylor_Swift-Travis_Kelce_timeline_Every.pdf"
+    ],
+    "seconds": 0.25,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0161",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "30f78d74f1_Meta_says_its_prioritizing_livestreaming.pdf",
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "c8c65a19f7_The_FTX_trial_is_bigger_than_Sam_Bankman.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf"
+    ],
+    "seconds": 0.32,
+    "doc_recall_at": {
+     "8": 0.6666666666666666
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0184",
+    "type": "temporal_query",
+    "gold": 2,
+    "docs": [
+     "b79fb7273d_SBFs_trial_starts_soon_but_how_did_he__a.pdf",
+     "42ecc85102_Sam_Altman_backs_teens_startup_Google_un.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "a07095fcf5_Gen_Z_just_saw_the_worst_war_in_Israel_i.pdf",
+     "343b782e66_Sam_Bankman-Fried_was_a_terrible_boyfrie.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "171437411c_The_jury_finally_hears_from_Sam_Bankman-.pdf",
+     "6e11d3cd52_Is_Sam_Bankman-Fried_a_bad_man_or_a_good.pdf"
+    ],
+    "seconds": 0.49,
+    "doc_recall_at": {
+     "8": 0.5
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0227",
+    "type": "temporal_query",
+    "gold": 2,
+    "docs": [
+     "d1fa80f8d9_039Massive_intel_failure_by_Mossad039_Ha.pdf",
+     "0fbd5681d3_Israels_blockade_of_Gaza_means_that_a_re.pdf",
+     "702442c333_EU_fires_urgent_warning_at_Elon_Musks_X.pdf",
+     "a07095fcf5_Gen_Z_just_saw_the_worst_war_in_Israel_i.pdf",
+     "4356c6aae2_India_to_be_one_of_worlds_fastest_growin.pdf",
+     "30f78d74f1_Meta_says_its_prioritizing_livestreaming.pdf",
+     "799c33ab24_WebSummit_derailed_by_founders_public_fi.pdf",
+     "23049a37a9_Meta_has_a_moderation_bias_problem_not_j.pdf"
+    ],
+    "seconds": 0.25,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0232",
+    "type": "temporal_query",
+    "gold": 2,
+    "docs": [
+     "0d67b78c47_Steam_Deck_OLED_review_Its_just_better.pdf",
+     "09c11e30ca_Tim_Sweeney_on_Epics_victory_royale_over.pdf",
+     "883a73e0be_Bears_vs_Panthers_live_score_updates_hig.pdf",
+     "2b2d46695f_A_timeline_of_Sam_Altmans_firing_from_Op.pdf",
+     "fc2b434587_Teenage_Engineerings_KO_II_sampler_prove.pdf",
+     "28a2838981_The_Steam_Deck_OLED_improves_much_more_t.pdf",
+     "18d1a1d2a8_The_best_October_Prime_Day_gaming_deals.pdf",
+     "9519be55e7_The_best_controllers_for_PC_gaming.pdf"
+    ],
+    "seconds": 0.49,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   },
+   {
+    "id": "q0257",
+    "type": "temporal_query",
+    "gold": 3,
+    "docs": [
+     "eeb8dce8eb_Taylor_Swift_reveals_secret_start_to_her.pdf",
+     "e94f124d95_Deepfake_election_risks_trigger_EU_call.pdf",
+     "3c11b42c07_Sex_Signal_messages_and_sabotaging_FTXs.pdf",
+     "64e9667bcb_ChatGPT_Everything_you_need_to_know_abou.pdf",
+     "65a23c497a_Travis_Kelce_says_he_tried_to_delete_his.pdf",
+     "76fc19416a_Taylor_Swift_is_Times_Person_of_the_Year.pdf",
+     "0af9bd1848_Taylor_Swift-Travis_Kelce_timeline_Every.pdf",
+     "16056085ea_Travis_Kelce_faces_backlash_after_commen.pdf"
+    ],
+    "seconds": 0.4,
+    "doc_recall_at": {
+     "8": 1.0
+    },
+    "fact_recall_at": {
+     "8": 1.0
+    }
+   }
+  ]
+ }
+}

@@ -213,6 +213,7 @@ func buildCandidates(
 	missing []string,
 	evidence []store.Hit,
 	attempts []attempt,
+	dirTree DirTree,
 ) []Candidate {
 	var out []Candidate
 
@@ -242,6 +243,23 @@ func buildCandidates(
 			fmt.Sprintf("search(\"%s\")", truncateRunes(query, 60)),
 			"semantic + keyword retrieval for this query",
 		)
+	}
+
+	// One route down the directory tree per query, when the corpus has one.
+	//
+	// Offered alongside the hybrid search rather than instead of it: the two
+	// rank by different things, and which of them finds a document is exactly
+	// what the chooser is being asked to judge. A round that only ever offered
+	// the tree would make "the route walked into the wrong folder" invisible —
+	// there would be nothing to compare it against.
+	if dirTree != nil && dirTree.Has() {
+		for _, query := range dedupeQueries(queries) {
+			add(
+				ToolCall{Name: ToolDirSearch, Arguments: map[string]any{"query": query}},
+				fmt.Sprintf("dirtree(\"%s\")", truncateRunes(query, 60)),
+				"route down the corpus directory tree for this query",
+			)
+		}
 	}
 
 	// One exact-match probe per missing term — but only for terms a probe can

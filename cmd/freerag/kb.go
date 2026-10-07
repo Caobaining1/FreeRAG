@@ -10,10 +10,12 @@ import (
 
 	"freerag/internal/agent"
 	"freerag/internal/dense"
+	"freerag/internal/dirtree"
 	"freerag/internal/embed"
 	"freerag/internal/ipc"
 	"freerag/internal/kb"
 	"freerag/internal/store"
+	"freerag/internal/tree"
 )
 
 // kbRuntime is one knowledge base's live state.
@@ -41,6 +43,110 @@ type kbRuntime struct {
 	// or decompose → fan-out → synthesize). Nil when it could not be built, in
 	// which case `ask` falls back to the single agentic loop.
 	flow *agent.Flow
+
+	// trees is the vector-free structural index for this base (internal/tree),
+	// opened on first use like everything else here. Nil until then: building it
+	// on every startup would mean paying for a full corpus walk to answer a
+	// question nobody asked.
+	//
+	// treesMu guards it, and not `indexing`: tree.index writes while holding
+	// indexing, but tree.search may arrive before any base-level indexing runs,
+	// and the two touch the same map.
+	trees   *tree.Index
+	treesMu sync.Mutex
+
+	// dirs is the document-level directory tree for this base
+	// (internal/dirtree): the corpus organised into folders whose leaves are
+	// documents, which is the unit this channel recalls. Separate from `trees`
+	// because the two are built differently and rebuilt at different times: a
+	// section tree belongs to one document, this one belongs to the whole base
+	// and has to be rebuilt when the corpus changes shape.
+	dirs   *dirtree.Index
+	dirsMu sync.Mutex
+
+	// emitMu guards answerEmit, the sink the answer's streamed fragments are
+	// routed through.
+	//
+	// Per QUESTION rather than per base, and installed for the duration of one
+	// `ask`. What it may hold is a coalescer, which is stream state: one shared
+	// between two concurrent questions would merge one answer's text into the
+	// other's, and the result would look like a garbled answer rather than like
+	// a bug.
+	emitMu     sync.Mutex
+	answerEmit func(string)
+}
+
+// beginAnswerStream installs a sink for the answer's fragments and returns the
+// function that ends the stream.
+//
+// The default sink — straight to the notification channel — is installed at
+// open time (attachProgress). This replaces it for one question, so a caller
+// that never calls this still gets every fragment, one frame each.
+func (live *kbRuntime) beginAnswerStream(emit func(string)) func() {
+	live.emitMu.Lock()
+	previous := live.answerEmit
+	live.answerEmit = emit
+	live.emitMu.Unlock()
+	return func() {
+		live.emitMu.Lock()
+		live.answerEmit = previous
+		live.emitMu.Unlock()
+	}
+}
+
+// answerDelta hands one fragment to the current sink.
+//
+// The sink is fetched under the lock and called outside it: a coalescer's Write
+// takes its own lock, and holding this one across the emit would make two
+// concurrent questions share a lock they have no reason to share.
+func (live *kbRuntime) answerDelta(delta string) {
+	live.emitMu.Lock()
+	emit := live.answerEmit
+	live.emitMu.Unlock()
+	if emit == nil {
+		return
+	}
+	emit(delta)
+}
+
+// notifyAnswer emits one answer fragment as a JSON-RPC notification.
+func (k *kernel) notifyAnswer(delta string) {
+	if delta == "" {
+		return
+	}
+	k.progress("answer", map[string]any{"delta": delta})
+}
+
+// beginAnswerStream installs this question's answer sink, returning the function
+// that flushes and restores the default one.
+//
+// The returned function takes the result so the stream's shape can be reported
+// on the run it belongs to. How many fragments the generator produced and how
+// many frames they became is the entire claim coalescing makes, and a claim that
+// only reaches a log nobody reads is not measurable.
+func (k *kernel) beginAnswerStream(live *kbRuntime) func(result *agent.Result) {
+	window := streamCoalesceWindow()
+	if window <= 0 {
+		// Coalescing off: the default sink installed by attachProgress is used
+		// unchanged, one frame per fragment.
+		return func(*agent.Result) {}
+	}
+	coalescer := ipc.NewCoalescer(window, streamCoalesceMaxRunes(), k.notifyAnswer)
+	restore := live.beginAnswerStream(coalescer.Write)
+	return func(result *agent.Result) {
+		coalescer.Flush()
+		written, frames := coalescer.Metrics()
+		restore()
+		if written == 0 {
+			return
+		}
+		line := fmt.Sprintf("[Stream] %d fragment(s) -> %d frame(s) (window=%s).",
+			written, frames, window)
+		log.Print(line)
+		if result != nil {
+			result.Trace = append(result.Trace, line)
+		}
+	}
 }
 
 // kbFor resolves a knowledge base by id and loads it on first use.
@@ -130,6 +236,11 @@ func (k *kernel) loadBase(base kb.Base) (*kbRuntime, error) {
 		Store:        loaded,
 		Embedder:     bound,
 		DefaultLimit: agent.Medium().SnippetsPerQuery,
+		// The directory tree, when this base has one: a question asked in 问答 is
+		// then routed down the same tree the 目录树 screen draws. Nil for a base
+		// with no tree, and that is a property of the base, not an error — the
+		// tool says so and names the channel to use instead.
+		DirTree: k.dirTreeFor(live),
 	}
 	live.loop = &agent.Loop{
 		Store:   loaded,
@@ -146,6 +257,9 @@ func (k *kernel) loadBase(base kb.Base) (*kbRuntime, error) {
 		// Kept tied to the window the generator is asked for, so the two cannot
 		// drift apart.
 		MaxPromptChars: agent.PromptCharBudget(contextTokens()),
+		// Selective evidence compression; the zero value is OFF and reproduces
+		// the pre-REFRAG prompt exactly (refrag.go).
+		Refrag: refragConfig(),
 	}
 	if k.generator != nil {
 		live.loop.Model = k.generator
@@ -155,7 +269,7 @@ func (k *kernel) loadBase(base kb.Base) (*kbRuntime, error) {
 	if k.decider != nil {
 		live.loop.Chooser = agent.LayaToolChooser{Decide: k.decider}
 	}
-	k.attachProgress(live.loop)
+	k.attachProgress(live)
 
 	// The eino flow wraps this loop: it routes the question, and on the complex
 	// path splits it and runs several copies of the loop concurrently.
@@ -164,12 +278,13 @@ func (k *kernel) loadBase(base kb.Base) (*kbRuntime, error) {
 		Router:         agent.Router{Decide: k.decider},
 		Model:          live.loop.Model,
 		MaxPromptChars: agent.PromptCharBudget(contextTokens()),
+		// The same compression the simple path uses, passed explicitly so the
+		// two paths cannot disagree about how the prompt was built.
+		Refrag: refragConfig(),
 		OnStep: func(line string) {
 			k.progress("agent", map[string]any{"line": line})
 		},
-		OnAnswerDelta: func(delta string) {
-			k.progress("answer", map[string]any{"delta": delta})
-		},
+		OnAnswerDelta: live.answerDelta,
 	})
 	if err != nil {
 		log.Printf("warning: could not build the ask flow for %q (%v); ask will use a single agentic pass",
@@ -196,7 +311,8 @@ func (k *kernel) loadBase(base kb.Base) (*kbRuntime, error) {
 // Called for every base's loop rather than once: each base gets its own loop, and
 // a loop whose callbacks were never set answers without reporting anything —
 // which is invisible from the outside, so it has to be impossible to forget.
-func (k *kernel) attachProgress(loop *agent.Loop) {
+func (k *kernel) attachProgress(live *kbRuntime) {
+	loop := live.loop
 	// The loop's steps are the only thing that changes during a round, so
 	// forwarding them is what turns a frozen spinner into real progress.
 	loop.OnStep = func(line string) {
@@ -211,9 +327,12 @@ func (k *kernel) attachProgress(loop *agent.Loop) {
 	// a answer that may be rejected and replaced has no business in the place the
 	// answer goes: forwarding them is what made the answer appear to change its
 	// mind mid-run.
-	loop.OnAnswerDelta = func(delta string) {
-		k.progress("answer", map[string]any{"delta": delta})
-	}
+	//
+	// Routed through the runtime rather than straight to progress() so a single
+	// question can install a coalescer for the duration of its own stream
+	// (beginAnswerStream). The default below is the one-frame-per-fragment path.
+	live.answerEmit = k.notifyAnswer
+	loop.OnAnswerDelta = live.answerDelta
 }
 
 func denseBackendName(index store.DenseIndex) string {

@@ -44,6 +44,13 @@ LONG_PARAGRAPH_CHARS = 1200
 
 _HEADING_STYLE_RE = re.compile(r'^(heading|title|标题|标题\s*\d)', re.IGNORECASE)
 
+#: Word spells its heading depth "Heading3"; StyleId is the same string.
+_HEADING_NUMBER_RE = re.compile(r'(\d+)\s*$')
+
+#: One block a reflowable file contributes: (block_type, text, heading_level).
+#: heading_level is non-zero only for Titles, and 0 means "depth unknown".
+BlockTriple = Tuple[str, str, int]
+
 
 def suffix_of(path: str) -> str:
     return os.path.splitext(path)[1].lower()
@@ -70,8 +77,8 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def paragraphs_from_text(text: str, markdown: bool = False) -> List[Tuple[str, str]]:
-    """``(block_type, text)`` per paragraph, in reading order.
+def extract_blocks(text: str, markdown: bool = False) -> List[BlockTriple]:
+    """``(block_type, text, heading_level)`` per paragraph, in reading order.
 
     Blank lines separate paragraphs — but text extracted from a PDF, or written
     by an editor that wraps at column 80, often has none at all, and one file
@@ -80,25 +87,43 @@ def paragraphs_from_text(text: str, markdown: bool = False) -> List[Tuple[str, s
     its line breaks as well. Line breaks are the safer place to cut: the chunker
     merges the pieces back up to the merge ceiling anyway, and a break that used
     to be a paragraph keeps the boundary where the author put it.
+
+    ``heading_level`` is 0 for everything that is not a heading, and for a
+    heading whose depth is unknown (Word's "Title" style, say). It is what lets a
+    Markdown ``### 3.1 年假`` sit under the ``## 第三章`` above it instead of next
+    to it, which is the difference between a document tree that can be descended
+    and a flat list of titles that cannot.
     """
-    result: List[Tuple[str, str]] = []
+    result: List[BlockTriple] = []
     for block in re.split(r'\n\s*\n', text):
         body = _clean(block)
         if not body:
             continue
         if markdown and body.startswith('#'):
+            hashes = len(body) - len(body.lstrip('#'))
             heading = body.lstrip('#').strip()
             if heading:
-                result.append(('Title', heading))
+                result.append(('Title', heading, hashes))
                 continue
         if len(body) <= LONG_PARAGRAPH_CHARS:
-            result.append(('Text', body))
+            result.append(('Text', body, 0))
             continue
         for line in body.split('\n'):
             piece = _clean(line)
             if piece:
-                result.append(('Text', piece))
+                result.append(('Text', piece, 0))
     return result
+
+
+def paragraphs_from_text(text: str, markdown: bool = False) -> List[Tuple[str, str]]:
+    """``(block_type, text)`` per paragraph: `extract_blocks` without the levels.
+
+    Kept because the heading level is not part of what a chunk IS, and changing
+    every existing caller to unpack three values would be a breaking change for a
+    field most of them cannot use. The tree builder reads the levels through
+    `load_blocks` instead.
+    """
+    return [(kind, body) for kind, body, _ in extract_blocks(text, markdown)]
 
 
 def paragraphs_from_docx(path: str) -> List[Tuple[str, str]]:
@@ -187,6 +212,37 @@ def _docx_table(table: ET.Element) -> str:
     return '\n'.join(lines)
 
 
+def blocks_from_docx(path: str) -> List[BlockTriple]:
+    """Blocks (and Markdown-rendered tables) with each Word heading's depth."""
+    with zipfile.ZipFile(path) as archive:
+        document = ET.fromstring(archive.read('word/document.xml'))
+
+    result: List[BlockTriple] = []
+    body = document.find(WORD_NS + 'body')
+    if body is None:
+        return result
+
+    for node in body:
+        tag = node.tag
+        if tag == WORD_NS + 'p':
+            text = _docx_paragraph(node)
+            if not text:
+                continue
+            style = _docx_style(node)
+            if _HEADING_STYLE_RE.match(style or '') and len(text) <= HEADING_MAX_CHARS:
+                # Word names its levels Heading1..Heading9; a localized template
+                # keeps the id but renames the style, so the id is read first.
+                number = _HEADING_NUMBER_RE.search(style or '')
+                result.append(('Title', text, int(number.group(1)) if number else 0))
+            else:
+                result.append(('Text', text, 0))
+        elif tag == WORD_NS + 'tbl':
+            markdown = _docx_table(node)
+            if markdown:
+                result.append(('Table', markdown, 0))
+    return result
+
+
 def _convert_with_textutil(path: str) -> str:
     """DOC/RTF -> text. macOS only; the error says so rather than guessing."""
     try:
@@ -204,15 +260,26 @@ def _convert_with_textutil(path: str) -> str:
     return _decode(finished.stdout)
 
 
-def load_paragraphs(path: str) -> List[Tuple[str, str]]:
-    """``(block_type, text)`` for a non-PDF document, in reading order."""
+def load_blocks(path: str) -> List[BlockTriple]:
+    """``(block_type, text, heading_level)`` for a non-PDF document.
+
+    The tree builder reads documents through this rather than through
+    `load_paragraphs`, because a heading's depth is not recoverable afterwards:
+    once ``### 3.1 年假`` has become the string ``"3.1 年假"``, nothing downstream
+    can tell whether it was a subsection or a sibling of the chapter above it.
+    """
     suffix = suffix_of(path)
     if suffix in DOCX_SUFFIXES:
-        return paragraphs_from_docx(path)
+        return blocks_from_docx(path)
     if suffix in CONVERTED_SUFFIXES:
-        return paragraphs_from_text(_convert_with_textutil(path))
+        return extract_blocks(_convert_with_textutil(path))
     if suffix in TEXT_SUFFIXES:
         with open(path, 'rb') as handle:
             raw = handle.read()
-        return paragraphs_from_text(_decode(raw), markdown=suffix in ('.md', '.markdown'))
+        return extract_blocks(_decode(raw), markdown=suffix in ('.md', '.markdown'))
     raise ValueError(f'unsupported document format: {suffix or path}')
+
+
+def load_paragraphs(path: str) -> List[Tuple[str, str]]:
+    """``(block_type, text)`` for a non-PDF document, in reading order."""
+    return [(kind, body) for kind, body, _ in load_blocks(path)]

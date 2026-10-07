@@ -29,6 +29,12 @@ const defaultDecideTimeout = 2 * time.Minute
 // error the UI can show.
 const defaultRenderTimeout = 30 * time.Second
 
+// Warmup timeout. Building a session is the expensive part — measured at 7.5 s
+// to compile the layout model for CoreML, against 0.05 s on CPU — and on a
+// machine that compiles slowly it is slower still. Generous because the only
+// thing waiting on it is a log line.
+const defaultWarmupTimeout = 2 * time.Minute
+
 // Chunk is one parsed chunk as the sidecar returns it.
 type Chunk struct {
 	ChunkID  string         `json:"chunk_id"`
@@ -288,6 +294,51 @@ func (s *Service) Decide(ctx context.Context, req DecisionRequest, timeout time.
 		return nil, err
 	}
 	return &decision, nil
+}
+
+// WarmupModel is one deepdoc model's half of a WarmupReport.
+type WarmupModel struct {
+	// Available is false when the model file is not installed, in which case
+	// the remaining fields are meaningless.
+	Available bool `json:"available"`
+	// Provider is what the session reports it is running on, e.g.
+	// "CoreMLExecutionProvider;CPUExecutionProvider". This is the answer to
+	// "is this machine accelerated" — not the platform, and not the provider
+	// list the runtime merely offers.
+	Provider string `json:"provider"`
+	// Seconds is how long the session took to build, i.e. the cost that
+	// warm-up exists to move off the first document.
+	Seconds float64 `json:"seconds"`
+	// Error is set when the build failed; the caller logs it and carries on.
+	Error string `json:"error"`
+}
+
+// WarmupReport is what the sidecar's `warmup` method answers.
+type WarmupReport struct {
+	// Providers is the resolved list both models were built with.
+	Providers []string `json:"providers"`
+	Layout    WarmupModel `json:"layout"`
+	TSR       WarmupModel `json:"tsr"`
+}
+
+// Warmup builds the deepdoc sessions in the sidecar and reports where they
+// landed.
+//
+// Two reasons to call it, and they are the two halves of the report: the
+// accelerated session costs seconds to build and that cost otherwise lands
+// inside the first document, and the provider a session actually runs on is
+// not something the platform can be trusted to predict.
+func (s *Service) Warmup(ctx context.Context) (*WarmupReport, error) {
+	client, err := s.ensureClient()
+	if err != nil {
+		return nil, err
+	}
+	var report WarmupReport
+	if err := client.Call(ctx, "warmup", map[string]any{}, &report,
+		defaultWarmupTimeout); err != nil {
+		return nil, err
+	}
+	return &report, nil
 }
 
 // HasLaya reports whether the sidecar can run Laya decisions.

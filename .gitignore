@@ -56,6 +56,9 @@ venv/
 # Evaluation venv (ragas pulls langchain/datasets; kept out of the sidecar runtime)
 /.venv-ragas/
 
+# Chart model venv (torch + pinned transformers; only needed where Laya-Chart runs)
+/.venv-chartvlm/
+
 # Evaluation workspace: KBs, runs and the frozen split. NOT pushed (user's call,
 # 2026-10-02). Nothing here is lost by that: `scripts/ragas_eval.py freeze` rebuilds
 # the split deterministically from benchmarks/MultiHop-RAG, and the KB is rebuilt by

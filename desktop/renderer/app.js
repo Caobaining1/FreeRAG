@@ -53,6 +53,17 @@ const state = {
   selectedSession: '',
   selectedConversation: '',
 
+  // Which of the right pane's two modes is showing.
+  // `mode` rather than a boolean because a third is coming (quote verification,
+  // once a passage can be checked against the section that produced it), and
+  // string-of-four-states is not something to build twice.
+  mode: 'chunks',
+
+  // The corpus directory tree: its shape as the kernel reports it, and nothing
+  // else. Retrieval over the tree happens in 问答, so there is no result to
+  // keep here — the tree is the artefact, not a query window onto it.
+  dirStatus: null,
+
   busy: false,
   startedAt: 0,
   timer: null,
@@ -397,6 +408,17 @@ async function enterKB(id) {
   // would show one base's chunks under another base's name until the next fetch
   // landed — and nothing would say which of the two was on screen.
   resetInspector();
+  // Belongs to the base being left: another base's directory tree would be
+  // drawn over this base's name.
+  state.dirStatus = null;
+  // Another base's tree would open the same node ids, which exist there too and
+  // mean something else — a left-over expansion state is a tree that appears to
+  // have been explored when it has not.
+  dirOpen.clear();
+  dirOpen.add('__root__');
+  state.mode = 'chunks';
+  renderDirStatus();
+  applyMode();
   show('kb-picker', false);
   show('kb-detail', true);
 
@@ -442,14 +464,18 @@ function resetInspector() {
   state.inspectPage = 1;
   state.inspectSelected = '';
   state.inspectMeta = null;
-  show('inspect-empty', true);
-  show('inspect-body', false);
+  applyMode();
 }
 
 /** Opens one document: all its chunks, and the first page they came from. */
 async function openDocument(docId) {
   if (!state.selectedKB) return;
-  if (state.inspectDoc === docId) return;
+  if (state.inspectDoc === docId) {
+    // Already open — so this click can only mean "show me that one again", which
+    // is what "switch back to the chunks pane" is, not a no-op.
+    setMode('chunks');
+    return;
+  }
   clearNotice();
 
   state.inspectDoc = docId;
@@ -471,8 +497,10 @@ async function openDocument(docId) {
   state.inspectPages = payload.pages || [];
   state.inspectPage = state.inspectPages.length ? state.inspectPages[0].page : 1;
 
-  show('inspect-empty', false);
-  show('inspect-body', true);
+  // Choosing a document while the search panel is up means the user wants to
+  // look INSIDE it, so the pane follows rather than staying on a list of hits.
+  state.mode = 'chunks';
+  applyMode();
   renderDocumentList();
   renderChunkList();
   await loadPage(state.inspectPage);
@@ -636,6 +664,312 @@ function renderChunkList() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// the corpus directory tree
+//
+// The right pane's second mode, and it does two things only: build the tree,
+// and show it.
+//
+// Retrieval over the tree is deliberately NOT offered here. A directory tree is
+// not something a reader has a question about — it is the shape a question gets
+// routed over, so asking belongs to 问答, where questions are asked, and what
+// this screen owes the reader is the shape itself: which folders the corpus was
+// split into, how many documents each holds, and which of those folders the
+// system invented rather than found.
+//
+// Drawn rather than listed for the same reason: the split is a claim about the
+// corpus, and a claim that can only be read as numbers is a claim nobody can
+// check. A folder called "ChatGPT Everything / Mass breach of privacy TikTok"
+// is either a good grouping or a bad one, and no count can tell you which.
+
+// The whole tree is fetched, not the first few levels: opening a node has to be
+// instant, and a click that waits on the kernel is a tree that feels broken.
+// 48 folders and their file lists is a few tens of KB.
+const DIR_DEPTH = 8;
+
+// Which folders are open, by node id. A Set rather than a flag on the node
+// objects: the tree arrives fresh from the kernel on every refresh, so state
+// kept on it would be thrown away each time.
+const dirOpen = new Set(['__root__']);
+
+/** The directory tree's shape, for the knowledge base currently open. */
+async function refreshDirStatus() {
+  if (!state.selectedKB) return;
+  // Said while it is happening: a 70-document corpus takes a moment to walk,
+  // and a panel that says nothing during that moment looks finished.
+  $('dir-status').textContent = '读取目录树…';
+  try {
+    state.dirStatus = await rpc('fs.status', { kb: state.selectedKB, depth: DIR_DEPTH });
+  } catch (error) {
+    // No tree yet is a normal state, not a failure: the panel says so and
+    // offers the rebuild. Everything else on this screen works without one.
+    state.dirStatus = null;
+  }
+  renderDirStatus();
+}
+
+function renderDirStatus() {
+  const status = state.dirStatus;
+  const label = $('dir-status');
+  if (!status) {
+    label.textContent = state.selectedKB ? '目录树尚未建立' : '';
+    label.className = 'bad-text';
+    show('dir-stale', false);
+    $('dir-ask-hint').textContent = '';
+    renderDirTreeEmpty(state.selectedKB ? '这个知识库还没有目录树。' : '');
+    return;
+  }
+  const parts = [
+    `${status.documents} 篇`,
+    `${status.nodes} 个目录`,
+    `${status.leaves} 个叶子`,
+    `深 ${status.depth}`,
+  ];
+  // "真实目录" and "内容聚类" are not the same kind of object and are not
+  // equally trustworthy: one is the user's own filing, the other is a grouping
+  // this system invented. The tree mixes them freely, so the mix is reported.
+  const from = { path: '来自真实目录', cluster: '内容聚类而来', mixed: '目录与聚类混合' }[status.from];
+  if (from) parts.push(from);
+  if (status.decider) parts.push(`决策者 ${status.decider}`);
+  label.textContent = parts.join(' · ');
+  label.className = 'muted';
+  // Indexing does not rebuild the directory tree, so a base that just gained
+  // documents is routed over a tree that does not contain them. Said here
+  // rather than silently: the alternative is a route that cannot possibly
+  // recall the document the user just added, with no sign of why.
+  const stale = $('dir-stale');
+  const behind = state.documents.length && status.documents !== state.documents.length
+    ? state.documents.length - status.documents
+    : 0;
+  stale.textContent = behind > 0 ? `${behind} 篇新文档未纳入目录树` : '';
+  show('dir-stale', behind > 0);
+  // Where the tree is actually used. Stated on the screen that builds it,
+  // because otherwise the reader is left to guess whether this artefact does
+  // anything — and a tree that turns out to be decorative is a tree nobody
+  // builds twice.
+  $('dir-ask-hint').textContent = '问答会用这棵树检索';
+  renderDirTree();
+}
+
+/**
+ * The tree area's own empty state.
+ *
+ * Written into the tree's own box rather than only into the status line: an
+ * empty panel next to a line of muted text is read as "the tree failed to
+ * render", not as "there is no tree yet", and the difference decides whether
+ * the reader presses 重建目录树 or reports a bug.
+ */
+function renderDirTreeEmpty(text) {
+  const host = $('dir-tree');
+  host.innerHTML = '';
+  if (!text) return;
+  const box = document.createElement('div');
+  box.className = 'map map-empty';
+  const line = document.createElement('div');
+  line.className = 'map-empty-text';
+  line.textContent = text;
+  box.appendChild(line);
+  if (state.selectedKB) {
+    const button = document.createElement('button');
+    button.className = 'primary';
+    button.type = 'button';
+    button.textContent = '重建目录树';
+    button.addEventListener('click', rebuildDirs);
+    box.appendChild(button);
+  }
+  host.appendChild(box);
+}
+
+/**
+ * Draws the corpus as a tree that opens left to right.
+ *
+ * Left to right, not top to bottom: the route descends this tree one level per
+ * decision, and a descent reads as depth — which is horizontal distance here,
+ * the same way it is in a file browser. Every node is a card; opening one
+ * reveals the folders and the files directly under it, to its right.
+ *
+ * Only what has been opened is drawn. The whole tree is 48 folders deep three
+ * levels; drawing all of it at once is a picture of nothing, and the reader
+ * is looking for one branch, not for all of them.
+ */
+function renderDirTree() {
+  const host = $('dir-tree');
+  host.innerHTML = '';
+  const tree = (state.dirStatus && state.dirStatus.tree) || [];
+  if (!tree.length) {
+    renderDirTreeEmpty(state.selectedKB ? '这个知识库还没有目录树。' : '');
+    return;
+  }
+
+  // Widest folder in the tree, so a card's bar compares it with the rest of
+  // the corpus rather than with itself.
+  let widest = 1;
+  const scan = (nodes) => nodes.forEach((node) => {
+    widest = Math.max(widest, node.docs || 0);
+    if (node.kids) scan(node.kids);
+  });
+  scan(tree);
+
+  const root = dirTreeNode(
+    {
+      nid: '__root__',
+      name: '语料库',
+      from: state.dirStatus.from,
+      children: tree.length,
+      docs: state.dirStatus.documents || 0,
+      own_docs: 0,
+      files: [],
+      kids: tree,
+    },
+    widest,
+  );
+  root.classList.add('tl-root');
+  host.appendChild(root);
+}
+
+/** One folder: its card, and — when open — its children to the right. */
+function dirTreeNode(node, widest) {
+  const item = document.createElement('div');
+  item.className = 'tl-node';
+  const open = dirOpen.has(node.nid);
+  const kids = node.kids || [];
+  const files = node.files || [];
+
+  const card = document.createElement('div');
+  card.className = 'tl-card';
+  if (open) card.classList.add('open');
+  card.title = node.name || '';
+
+  // Whether it opens further, and which way: a folder with nothing under it
+  // must not look clickable.
+  const mark = document.createElement('span');
+  mark.className = 'tl-mark';
+  mark.textContent = !kids.length && !files.length ? '·' : open ? '−' : '+';
+
+  const name = document.createElement('span');
+  name.className = 'tl-name';
+  name.textContent = node.name || node.nid;
+
+  const meta = document.createElement('span');
+  meta.className = 'tl-meta';
+  const parts = [`${node.docs || 0} 篇`];
+  if (kids.length) parts.push(`${kids.length} 个子目录`);
+  if (files.length && (node.own_docs || 0) > files.length) {
+    // The kernel names the first 40 files in a folder; the count stays exact,
+    // so a folder of 200 says "200 篇" and lists what it can.
+    parts.push(`列出前 ${files.length} 个`);
+  }
+  meta.textContent = parts.join(' · ');
+
+  card.append(mark, name, meta);
+
+  const bar = document.createElement('span');
+  bar.className = 'tl-bar';
+  const fill = document.createElement('i');
+  // Capped at the track: the root holds every document in the corpus, so it is
+  // several times wider than the widest folder — and a bar overflowing its card
+  // is a bar that cannot be read.
+  const share = Math.min(100, Math.max(3, ((node.docs || 0) / widest) * 100));
+  fill.style.width = share + '%';
+  bar.appendChild(fill);
+  card.appendChild(bar);
+
+  // A folder this system invented is marked as one: trusting a cluster as much
+  // as the user's own directory is the mistake the `from` field exists to make
+  // impossible.
+  if (node.from === 'cluster') {
+    const tag = document.createElement('span');
+    tag.className = 'tl-tag';
+    tag.textContent = '聚类';
+    card.appendChild(tag);
+  }
+
+  card.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (!kids.length && !files.length) return;
+    if (dirOpen.has(node.nid)) dirOpen.delete(node.nid);
+    else dirOpen.add(node.nid);
+    renderDirTree();
+  });
+
+  item.appendChild(card);
+  if (open && (kids.length || files.length)) {
+    const column = document.createElement('div');
+    column.className = 'tl-children';
+    kids.forEach((kid) => column.appendChild(dirTreeNode(kid, widest)));
+    files.forEach((file) => column.appendChild(dirTreeFile(file)));
+    item.appendChild(column);
+  }
+  return item;
+}
+
+/** One document under a folder. Clicking it opens the document itself. */
+function dirTreeFile(file) {
+  const item = document.createElement('div');
+  item.className = 'tl-node';
+  const card = document.createElement('div');
+  card.className = 'tl-file';
+  card.title = file.name || '';
+  const mark = document.createElement('span');
+  mark.className = 'tl-mark';
+  mark.textContent = '◦';
+  const name = document.createElement('span');
+  name.className = 'tl-name';
+  name.textContent = file.name || file.id;
+  card.append(mark, name);
+  card.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (file.id) openDocument(file.id);
+  });
+  item.appendChild(card);
+  return item;
+}
+
+/** (Re)builds the corpus directory tree. */
+async function rebuildDirs() {
+  if (!state.selectedKB) return;
+  clearNotice();
+  setBusy(true, '建目录树…');
+  try {
+    const reply = await rpc('fs.index', { kb: state.selectedKB });
+    // Rebuilt, so the old node ids are gone: keeping which of them were open
+    // would silently re-open folders that no longer exist, or worse, different
+    // ones that happen to reuse the id.
+    dirOpen.clear();
+    dirOpen.add('__root__');
+    await refreshDirStatus();
+    notice(`已把 ${reply.documents} 篇文档聚成 ${reply.nodes} 个目录（来源 ${reply.from}）`, 'ok');
+  } catch (error) {
+    notice('建目录树失败：' + error.message, 'bad');
+  } finally {
+    setBusy(false);
+  }
+}
+
+
+/** Right-pane mode: 'chunks' shows one document, 'search' and 'dir' ask the corpus. */
+function applyMode() {
+  $('mode-chunks').classList.toggle('active', state.mode === 'chunks');
+  $('mode-dir').classList.toggle('active', state.mode === 'dir');
+  // One place decides all three: which of them is visible follows from the mode
+  // and from whether a document is open, so a later change cannot leave two on
+  // screen at once.
+  const inspecting = state.mode === 'chunks' && Boolean(state.inspectDoc);
+  show('inspect-body', inspecting);
+  show('inspect-empty', state.mode === 'chunks' && !inspecting);
+  show('dir-body', state.mode === 'dir');
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  applyMode();
+  clearNotice();
+  // The tree is loaded with the mode rather than on some later action, because
+  // the tree IS what this mode shows — there is nothing else on the screen to
+  // prompt a fetch.
+  if (mode === 'dir') refreshDirStatus();
+}
+
 async function createKB() {
   const answer = await askForInput({ title: '新建知识库', placeholder: '例如：论文库' });
   if (!answer || !answer.name) return;
@@ -791,6 +1125,10 @@ async function indexPaths(paths) {
     results.push(...outcomes);
     await refreshDocuments();
     await refreshHealth();
+    // The corpus directory tree is NOT rebuilt by indexing — a document joins
+    // it only when 重建目录树 runs. Refreshed anyway so the line can say the
+    // tree is behind the corpus rather than quietly describing the old one.
+    refreshDirStatus();
     notice(indexSummary(results), 'ok');
   } catch (error) {
     notice('索引失败：' + error.message, 'bad');
@@ -843,6 +1181,10 @@ async function forgetDocument(doc) {
   try {
     const reply = await rpc('forget', { md5: doc.md5, kb: state.selectedKB });
     await refreshDocuments();
+    // It left the corpus, so the directory tree is now describing a corpus that
+    // does not contain it — until 重建目录树 runs. Refreshed so the panel can
+    // say so rather than quietly count a document that is gone.
+    refreshDirStatus();
     notice(`已移除 ${name}（${reply.removed} chunks）`, 'ok');
   } catch (error) {
     notice('移除失败：' + error.message, 'bad');
@@ -1497,6 +1839,10 @@ $('kb-rename').addEventListener('click', renameKB);
 $('kb-delete').addEventListener('click', deleteKB);
 $('doc-add').addEventListener('click', addDocuments);
 
+$('mode-chunks').addEventListener('click', () => setMode('chunks'));
+$('mode-dir').addEventListener('click', () => setMode('dir'));
+$('dir-index').addEventListener('click', rebuildDirs);
+
 // The inspector's controls. A page turn is a fetch (the image has to be
 // rendered), while the two filters are pure re-renders over chunks already in
 // hand — so neither waits on the kernel.
@@ -1536,23 +1882,110 @@ dropzone.addEventListener('drop', async (event) => {
 // ---------------------------------------------------------------------------
 // settings
 
+/** "CoreMLExecutionProvider;CPUExecutionProvider" -> "CoreML 加速". */
+function shortProvider(provider) {
+  if (!provider) return '未加载';
+  const name = String(provider).split(';')[0].replace(/ExecutionProvider$/, '');
+  return { CoreML: 'CoreML 加速', CUDA: 'CUDA 加速', Dml: 'DirectML 加速',
+    CPU: 'CPU（本机未获得加速）' }[name] || name;
+}
+
+/**
+ * One line for the settings dialog: what this machine offers, and what the
+ * models actually got.
+ *
+ * Both halves, because they are allowed to disagree and the disagreement is
+ * invisible otherwise — the scan can report a GPU while every model runs on
+ * CPU, because the runtime bundled with this install has no provider for it.
+ */
+function describeHardware(hardware, reported) {
+  if (!hardware) return '未能检测本机配置。';
+  const accelerator = hardware.accelerator || {};
+  const offered = accelerator.vendor === 'apple'
+    ? 'Apple 芯片（Metal）'
+    : accelerator.vendor === 'nvidia'
+      ? `NVIDIA ${accelerator.name || ''}（CUDA）`.trim()
+      : '未检测到加速器';
+  const parts = [
+    offered,
+    `${(hardware.memoryBytes / 1024 ** 3).toFixed(0)} GB 内存`,
+    `${hardware.cpu?.cores || '?'} 核 CPU`,
+  ];
+
+  const lines = [parts.join(' · ')];
+  // The second half is the kernel's, and it is the one that matters: sessions
+  // report their own provider, so this is measured rather than predicted.
+  const deepdoc = reported?.result?.deepdoc;
+  if (deepdoc?.warmed) {
+    lines.push(`版面与表格：${shortProvider(deepdoc.layout?.provider)}`);
+  } else {
+    lines.push('版面与表格：尚未预热');
+  }
+  if (reported?.result?.chart?.enabled) lines.push('图表转译：已启用');
+  return lines.join('；');
+}
+
+/** Fills the hardware row, asking both the shell and the kernel. */
+async function loadHardware() {
+  const node = $('settings-hardware');
+  if (!node) return;
+  node.textContent = '检测中…';
+  try {
+    const [hardware, reported] = await Promise.all([
+      api.hardware(),
+      // The kernel may still be warming up; a missing report is said out loud
+      // rather than filled in with a guess.
+      api.rpc('hardware').catch(() => null),
+    ]);
+    node.textContent = describeHardware(hardware, reported);
+  } catch (error) {
+    node.textContent = `检测失败：${error.message}`;
+  }
+}
+
 function fillSettingsForm(settings) {
   $('settings-language').value = settings.answerLanguage || '';
   $('settings-vision').checked = Boolean(settings.vision);
+  $('settings-vision-backend').value = settings.visionBackend || 'general';
   $('settings-vision-model').value = settings.visionModel || '';
   $('settings-vision-workers').value = settings.visionWorkers;
   $('settings-vision-tokens').value = settings.visionMaxTokens;
   $('settings-vision-side').value = settings.visionMaxSide;
+  syncVisionForm();
   // The one field that is not live. The caption gate is sized when the stage
   // first runs (cmd/freerag/vision.go), and resizing a semaphore in flight is
   // not something to guess at — so this says so instead of looking applied.
-  $('settings-note').textContent = '「描述并发」在下次启动后生效，其余立即生效。';
+  // Two of these are read when the kernel is spawned, not when it is told —
+  // FREERAG_VLM names the backend and the gate is sized on first use. Saying so
+  // beats a dialog that looks applied and is not.
+  $('settings-note').textContent = '「图表识别方式」与「描述并发」在下次启动后生效，其余立即生效。';
+  loadHardware();
+}
+
+/**
+ * Greys out what the chosen backend does not read.
+ *
+ * Under Laya-Chart the model name, the worker count and the token ceiling are
+ * all ignored: the model is the chart service's own, it decodes one chart at a
+ * time, and its budget is fixed at 768 — below which the transcribed tables come
+ * back half-written. Leaving them editable would let a user store values that
+ * survive, apply, and change nothing.
+ */
+function syncVisionForm() {
+  const chart = $('settings-vision-backend').value === 'chart';
+  for (const id of ['settings-vision-model', 'settings-vision-workers', 'settings-vision-tokens']) {
+    $(id).disabled = chart;
+  }
+  $('settings-vision-model-note').textContent = chart
+    ? '图表模式不读取这三项：模型与预算由图表服务自己决定。'
+    : '';
 }
 
 function readSettingsForm() {
   return {
     answerLanguage: $('settings-language').value,
     vision: $('settings-vision').checked,
+    visionBackend: $('settings-vision-backend').value,
     visionModel: $('settings-vision-model').value,
     visionWorkers: Number($('settings-vision-workers').value),
     visionMaxTokens: Number($('settings-vision-tokens').value),
@@ -1575,6 +2008,26 @@ async function openSettings() {
 }
 
 $('settings-open').addEventListener('click', () => { openSettings(); });
+
+// Kept in step as the choice changes, not only when the dialog opens: which of
+// these fields the backend reads is the point of showing it, and a greyed-out
+// field the user just typed into is worse than no hint at all.
+$('settings-vision-backend').addEventListener('change', () => { syncVisionForm(); });
+
+// Re-scanning replaces the cache rather than amending it: hardware does not
+// change while the app is running, so a rescan is for the case where the first
+// one was wrong (a driver installed since, a scan that raced a boot).
+$('settings-hardware-rescan').addEventListener('click', async () => {
+  const node = $('settings-hardware');
+  node.textContent = '重新扫描中…';
+  try {
+    const hardware = await api.hardwareRescan();
+    const reported = await api.rpc('hardware').catch(() => null);
+    node.textContent = describeHardware(hardware, reported);
+  } catch (error) {
+    node.textContent = `扫描失败：${error.message}`;
+  }
+});
 
 // Enter must save, not cancel: implicit submission activates the first submit
 // button in tree order, which here is 取消 — the same trap as the prompt dialog.

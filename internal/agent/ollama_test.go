@@ -66,6 +66,113 @@ func TestThinkFilter(t *testing.T) {
 	}
 }
 
+// Temperature 0 must reach the server.
+//
+// It is the value every measurement run asks for and the one the wire format is
+// easiest to drop: "send it only when it is positive" reads as a sensible
+// default and silently turns greedy decoding into the server's 0.8. The symptom
+// is not an error — it is a run that looks reproducible and is not
+// (docs/performance.md §10.3).
+func TestOllamaSendsZeroTemperature(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":"ok"}}`)
+	}))
+	defer server.Close()
+
+	if _, err := (&OllamaModel{BaseURL: server.URL, Model: "m", Temperature: 0}).Complete(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	options, _ := body["options"].(map[string]any)
+	if value, ok := options["temperature"]; !ok || value != float64(0) {
+		t.Fatalf("options = %v, want temperature 0 on the wire", options)
+	}
+}
+
+// A negative temperature is how a caller asks for the server's own default.
+func TestOllamaOmitsTemperatureWhenNegative(t *testing.T) {
+	var body map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = io.WriteString(w, `{"message":{"role":"assistant","content":"ok"}}`)
+	}))
+	defer server.Close()
+
+	if _, err := (&OllamaModel{BaseURL: server.URL, Model: "m", Temperature: -1}).Complete(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	options, _ := body["options"].(map[string]any)
+	if _, ok := options["temperature"]; ok {
+		t.Fatalf("options = %v, want no temperature", options)
+	}
+}
+
+// The generator's own token counts and timings are carried on the Reply.
+//
+// Ollama repeats the RUNNING totals on every chunk, so a collector that summed
+// them would report the count multiplied by the number of chunks — a wrong
+// number that looks entirely plausible, which is the dangerous kind. The
+// fixture below repeats them deliberately, as the server does.
+func TestCompleteStreamCapturesGeneratorUsage(t *testing.T) {
+	server, _ := streamServer(t,
+		map[string]any{
+			"message":           map[string]string{"role": "assistant", "content": "half "},
+			"done":              false,
+			"prompt_eval_count": 100, "prompt_eval_duration": 40_000_000,
+			"eval_count": 5, "eval_duration": 500_000_000,
+		},
+		map[string]any{
+			"message":           map[string]string{"role": "assistant", "content": "an answer"},
+			"done":              true,
+			"prompt_eval_count": 100, "prompt_eval_duration": 50_000_000,
+			"eval_count": 12, "eval_duration": 1_500_000_000,
+		},
+	)
+
+	reply, err := (&OllamaModel{BaseURL: server.URL, Model: "m"}).CompleteStream(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil, nil)
+	if err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+	if reply.Usage == nil {
+		t.Fatal("usage was reported by the server but is not on the reply")
+	}
+	if reply.Usage.PromptTokens != 100 || reply.Usage.OutputTokens != 12 {
+		t.Fatalf("usage = %+v, want the final running totals (100 prompt, 12 output)", *reply.Usage)
+	}
+	// The last chunk's timings win, not the first's: the reply is complete when
+	// the stream ends, and its cost is the whole call.
+	if reply.Usage.PromptNanos != 50_000_000 || reply.Usage.OutputNanos != 1_500_000_000 {
+		t.Fatalf("timings = %+v, want the final chunk's", *reply.Usage)
+	}
+
+	line := reply.Usage.TraceLine()
+	for _, want := range []string{"prompt 100 tok", "output 12 tok", "2000 tok/s", "8.0 tok/s"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("trace line %q does not carry %q", line, want)
+		}
+	}
+}
+
+// A server that reports no accounting leaves Usage nil rather than reporting a
+// call that cost nothing: zero prompt tokens is a claim, not an absence.
+func TestCompleteStreamLeavesUsageNilWhenTheServerReportsNone(t *testing.T) {
+	server, _ := streamServer(t,
+		map[string]any{"message": map[string]string{"role": "assistant", "content": "ok"}, "done": true})
+
+	reply, err := (&OllamaModel{BaseURL: server.URL, Model: "m"}).Complete(
+		context.Background(), []Message{{Role: RoleUser, Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if reply.Usage != nil {
+		t.Fatalf("usage = %+v, want nil", *reply.Usage)
+	}
+}
+
 // streamServer replies with the given chunks as newline-delimited JSON, which is
 // how Ollama streams, and returns the server plus the decoded request.
 func streamServer(t *testing.T, chunks ...map[string]any) (*httptest.Server, *ollamaChatRequest) {

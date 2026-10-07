@@ -31,6 +31,7 @@
 | **模型存储去重** | ✅ 已验收 | `scripts/setup-ollama.sh` 硬链接；7.1 GB → 4.4 GB |
 | 检索工具面（§6.7） | ✅ 已验收 | `hybrid_search` / `grep_search` / `list_chunks` / `metadata_search` |
 | **每轮工具选择（Laya）** | ✅ 已接入 | 每轮把「问题 + 证据摘要 + 已试调用 + missing」发给 Laya，它在**确定性候选调用集**里选下一个（~100 ms）；Laya 不可用时回退模型规划 → 确定性计划。见「问答编排（eino）」 |
+| **REFRAG 式证据压缩** | ✅ 已接入（**默认关闭**） | 只展开排名最前的段落，其余以 gist 进入提示词：受控 A/B 实测 **TTFT 4.01×**（25.8s → 6.4s），池越深压缩比越高（池 20 → 3.50×，且 20/20 段全保留）。见「证据压缩（REFRAG 式）」 |
 | **问答编排（eino）** | ✅ 已接入 | `route`（Laya 判简单/复杂）→ 简单：单次 agentic pass；复杂：`decompose` → 并发 `fanout` → `synthesize` |
 | **Electron 桌面端（产品形态）** | ✅ 可用 | `desktop/`：文档列表 + 拖放/选择文件 + 提问 + 引用跳转 + 实时进度 |
 | **进度通知（JSON-RPC notification）** | ✅ 已接入 | `internal/ipc` 的 `Server.Notify`；`index` / `ask` 逐阶段上报 |
@@ -250,6 +251,7 @@ skipped=False  added=42  removed=28   28 stale chunk(s) replaced, 42 added
 | :--- | :--- | :--- |
 | `FREERAG_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama 服务地址 |
 | `FREERAG_MODEL` | `freerag-qwen3` | 生成模型名 |
+| `FREERAG_GENERATION_TEMPERATURE` | `0.2` | 采样温度。**`0` 就是贪心**（会真的下发）；负值才表示"用 Ollama 的默认"。评测必须设 `0`，否则同题两次会改写不同的查询 |
 | `FREERAG_NUM_CTX` | `8192` | 上下文窗口。**必须显式设置**：Ollama 默认 4096，小于 Agentic 循环拼出的证据块，超长 prompt 会被拒绝（HTTP 400）而不是截断 |
 | `FREERAG_THINK` | 空（**关闭**） | Qwen3 的推理模式。见下方「推理模式为什么默认关闭」 |
 | `FREERAG_KEEP_ALIVE` | `30m` | 模型在显存中的保留时长。Ollama 自己的默认是 5 分钟，短于一个人读完答案再问下一个的间隔 |
@@ -311,6 +313,96 @@ skipped=False  added=42  removed=28   28 stale chunk(s) replaced, 42 added
 | `FREERAG_EMBED_PROVIDER` | 空（关闭） | `siliconflow` 走托管 BGE-M3；空 = 纯关键词检索 |
 | `FREERAG_SILICONFLOW_KEY` | — | `siliconflow` 时必填 |
 
+### 统计图表专用后端（Laya-Chart 1.825B）
+
+通用视觉模型被明确要求**不要写数值**（`sidecar/vlm.py` 的提示词），理由见上一节：读错的数字进索引后
+永远没人看得见。这对流程图是对的，对柱状图是错的——数值被抹掉后，「2020 年营收是多少」无从命中。
+
+`FREERAG_VLM=chart` 换成图表专用模型：Laya-Chart 把图转译成 **Markdown 数据表 + 中英双语分析**，
+实测数字幻觉率 NHR **0.0095**（写出的数字里每千个有 9.5 个无法由它自己刚写的表推出）。数字策略因此
+**按部分相反**：
+
+| 产出 | 数值 | 原因 |
+| :--- | :--- | :--- |
+| 转译出的**表格** | ✅ 保留 | 它就是本后端存在的理由，是「X 年的值是多少」的答案来源 |
+| **分析**文字 | ❌ 剥离（复用 `stripNumbers`） | 幻觉集中在叙述里；分析只负责回答「这张图说明了什么」 |
+
+模型是自定义三件套（SigLIP2 + 投影 + Qwen3），需要 torch，且权重 7.4 GB 要常驻，所以它是**独立进程**，
+不是 sidecar 模块（sidecar 只有 pymupdf + onnxruntime）：
+
+```bash
+pip install -r chartvlm/requirements.txt
+
+# 两个 backbone 首次会从 HuggingFace 拉 ~4 GB；国内建议先用 ModelScope 拉到本地再指过去：
+python -c "from modelscope import snapshot_download; \
+print(snapshot_download('Qwen/Qwen3-1.7B')); \
+print(snapshot_download('google/siglip2-base-patch16-512'))"
+
+python chartvlm/server.py --root /path/to/laya-chart --port 8731 \
+    --llm    ~/.cache/modelscope/models/Qwen--Qwen3-1.7B/snapshots/master \
+    --vision ~/.cache/modelscope/models/google--siglip2-base-patch16-512/snapshots/master \
+    --preload                        # 不加则在首张图时再加载
+curl -s localhost:8731/health        # {"ok":true,"ready":true,...}
+```
+
+> **`transformers` 必须锁 `5.4.0`（已写在 requirements 里，不要升级）**。SigLIP2 的视觉参数名在版本间变过：
+> ≤5.0 拿到的 config 没有 `hidden_size`（投影层建不起来）；**≥5.5 把 `vision_model.` 这一层去掉了，208 个视觉
+> 参数全部 miss** —— 而 `load_state_dict(strict=False)` **不会报错**，视觉塔会以随机权重跑，输出格式完美、
+> 内容全是编的。判据是加载日志里的 `missing=` / `unexpected=` 必须**都不出现**（5.4.0 实测为 0）。
+
+装好依赖后**不需要手工起服务**——内核自己拉起并回收它：
+
+```bash
+FREERAG_VLM=chart ./freerag          # 或桌面端：设置 → 图表识别方式 → Laya-Chart
+```
+
+```
+figure captions: laya-chart-1.7b at http://127.0.0.1:59396 (concurrency 1, longest side 768px)
+                 (started by this process, port 59396)
+```
+
+端口是启动时现选的空闲端口，不是固定 8731：两个内核（比如开发版和桌面版）不该撞在同一个端口上，
+然后让没抢到的那个悄悄去用对方加载的模型。服务的 stderr 会转发进内核日志，权重在**首次转译**时才加载
+（不是启动时），关掉内核时进程一起退出、7.4 GB 归还。
+
+| 环境变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `FREERAG_VLM` | 空（关闭） | `chart` = 本后端；`go` = Go 侧通用视觉模型；空 = 只用解析期的 sidecar |
+| `FREERAG_CHARTVLM_ROOT` | 空（**必填**） | Laya-Chart 解压目录（含 `src/` `scripts/` `configs/` `ckpt_chart_1_7b_r5/`）。没设就不启动，并明确报错——不是等到第一张图才失败 |
+| `FREERAG_CHART_ENDPOINT` | 空 | 设了就**不自管**，连这个已有服务（适合 GPU 机器上常驻一个）。不设则内核自己拉起 |
+| `FREERAG_CHART_CONCURRENCY` | `1` | 并发数。**默认 1**（Ollama 路径是 4）：一次转译是 1.8B 模型解码最多 768 token，都在同一个 Python 进程里，第二张图是排队而不是并行 |
+| `FREERAG_CHART_MODEL` | `laya-chart-1.7b` | 只写进 chunk 的 `figure_summary_model` 作溯源。**刻意不共用 `FREERAG_VLM_MODEL`**：那个是 Ollama 标签，用它会把 Laya-Chart 干的活记成别的模型干的 |
+| `FREERAG_CHART_PYTHON` / `_SERVER` | 自动探测 | 解释器默认用仓库根的 `.venv-chartvlm/bin/python`（torch 只装在那里） |
+
+> 桌面端把 `FREERAG_VLM` 写成 `on`/`off`（驱动 sidecar 的解析期视觉），**只有选了 Laya-Chart 才写 `chart`**。
+> 选中后「视觉模型 / 描述并发 / 描述长度」三项会置灰：这三项在图表模式下不读取，留着可编辑等于让用户存一组
+> 会保存、会生效、但什么也不改的值。
+
+**入库前的护栏**（都是实测确认的失败模式，不是理论风险）：
+
+- **输出被截断就整张丢弃**。模型训练时的 `max_len` 装不下完整目标，它有「写一半就停」的倾向；
+  半张表比没有表更危险——它看起来是完整的，缺的行谁也看不出来。此时 chunk 记 `chart_truncated=true`
+  ，正文保持原样。
+- **密集图会转译不全**。图像 token 固定 640，20 条系列的图只能读到约 8 条；`chart_series > 8` 时
+  标 `chart_low_confidence=true` 供下游降权。
+- **`chart_type` 不可信**：20 万条真实训练样本的图型标签是随机填的，不要用它做过滤或路由。
+- `chart_nhr` / `chart_rows` / `chart_series` 一并写进 metadata，检索命中后可判断可信度。
+
+缓存与通用路径分开（`.chart.json`）：一次转译的**质检标志**不只是文字，无法从正文反推，所以必须一起缓存。
+
+**实测**（Apple M5 / MPS / fp32 / 850×600 的 ChartQA 图，端到端含 HTTP）：
+
+| 项 | 结果 |
+| :--- | :--- |
+| 单图耗时 | **105–107 s**（CUDA 上报告值 13.9 s，CPU/MPS 慢一个量级，批量入库建议夜间跑） |
+| 转译结果 | 13 行数据表，`truncated=false`、`schema_ok=true`、**NHR=0.0** |
+| 数值准确性 | Lamb 103.7 / Corn 103.1 → 差值 0.6，该图 ChartQA 标注答案 0.57 ✅ |
+| `chart_type` | 判成 `scatter`（实际是柱状图）—— 印证上文「图型不可信」，不要用它做过滤 |
+
+> 一个已知代价：分析文字经 `stripNumbers` 后句子会残缺（`The lowest point is  at Rice.`）。这是**故意的**
+> ——它换掉的是「误读的数值被当成证据永久检索」。表格已提供精确数值，分析只负责「这张图说明了什么」。
+> 若你的场景更看重分析可读性，改 `vision_chart.go` 的 `chartText()` 让它跳过 `stripNumbers` 即可。
+
 ## 问答延迟：推理模式与预热
 
 启动后第一次提问曾经要 **113 秒**。逐段实测（Apple M5 / 17GB / 4B Q4_K_M **全部在 GPU 上**）后，原因与预想不同：
@@ -371,6 +463,41 @@ model warm-up done in 5.326s
 > 上述数字来自本机实测，机器相关。在更慢的机器上 `think: false` 的相对收益会更大（生成更慢，而浪费的 token 不变）。
 >
 > `FREERAG_KEEP_ALIVE` 默认 `30m`：卸载模型会**连提示词缓存一起丢掉**，而工具定义与系统提示是每一轮首个请求的主体，重算这个前缀比重新加载权重更贵。
+
+## 证据压缩（REFRAG 式）与流式合并
+
+**默认都关闭**，且关闭时提示词与改造前**逐字节相同**——没有实测的提示词改动和回归无法区分。
+
+| 环境变量 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `FREERAG_REFRAG` | 空（**关闭**） | 打开**选择性证据压缩**。只把排名最前的段落展开成原文，其余以 gist 进入提示词 |
+| `FREERAG_REFRAG_EXPAND_TOP` | `4` | 展开前几段；其余压缩 |
+| `FREERAG_REFRAG_GIST_CHARS` | `240` | 每段保留多少字符（< 40 视为配置错误，回落默认） |
+| `FREERAG_STREAM_COALESCE_MS` | `0`（**关闭**） | 答案分片的合并窗口；首帧永不等待 |
+| `FREERAG_STREAM_COALESCE_RUNES` | `0` | 合并帧的字符上限，到顶即发 |
+
+**实测（受控 A/B：同一问题、同一证据池、同一生成器，只换渲染方式；预热 + 交替两遍取最快）**：
+
+```
+未压缩  证据 13468 字符   TTFT 25.83s   整次调用 80.56s   答案 961 字符
+压缩后  证据  6818 字符   TTFT  6.44s   整次调用 46.09s   答案 887 字符
+```
+
+**TTFT 4.01×，且不是靠把答案写短换来的。** 证据块字符数随池深变化：
+池 6 → 1.52×、池 10 → 1.95×、池 20 → **3.50×**；池 20 时未压缩的块已被预算截断（14/20 段进入），
+压缩后 **20/20 段全在**——所以它同时买到"更少 token"和"更长上下文"。
+
+**流式合并默认关闭，因为它在结构上帮不上忙**：生成 ~4.5–6.4 tok/s，分片间隔约 **220 ms**，
+比 120 ms 的合并窗口还慢——绝大多数分片等不到同伴，只能自己成帧。
+实测（同题 2 臂 2 遍）：**帧 227 → 214（−5.7%），延迟无差别**。
+一帧的成本是微秒级，**没有东西可摊薄**。开关留着，条件写在 `internal/ipc/coalescer.go`：
+生成端比窗口快一个数量级时它才是收益。完整数据与"为什么不搬 REFRAG 的 encoder / RL 策略 / 预计算"
+见 [`docs/performance.md`](docs/performance.md) §10。
+
+> ⚠️ **`FREERAG_GENERATION_TEMPERATURE=0` 在此之前从未生效**（2026-10-05 修复）。
+> `OllamaModel` 原先只在 `temperature > 0` 时才下发，于是"0"等于什么都不发，实际跑在 Ollama 默认的
+> **0.8** 上——同一道题、同一个知识库，两次运行的证据池在 44k↔72k 字符之间跳。
+> 现在 `0` 就是贪心，负值才表示"用服务端默认"。**任何"温度 0 下的对比"结论都需要按这条重看。**
 
 ## 验收
 

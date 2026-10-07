@@ -180,7 +180,7 @@ func TestAnswerReportsDeltasAsTheAnswerIsWritten(t *testing.T) {
 	loop.OnAnswerDelta = func(delta string) { got = append(got, delta) }
 
 	answer := loop.answer(context.Background(), "what?",
-		[]store.Hit{{Chunk: store.Chunk{ChunkID: "c0", DocID: "a.pdf", Text: "alpha"}}}, "", "")
+		[]store.Hit{{Chunk: store.Chunk{ChunkID: "c0", DocID: "a.pdf", Text: "alpha"}}}, "", "", nil)
 
 	// The deltas must assemble into exactly the answer the call returns. A
 	// renderer shows the deltas while the loop reports the return value, so any
@@ -270,8 +270,8 @@ func TestMediumSpecMatchesPlan(t *testing.T) {
 			t.Fatalf("tools %v missing %q", spec.Tools, tool)
 		}
 	}
-	if len(spec.Tools) != 4 {
-		t.Fatalf("tools = %v, want exactly the four of docs/plan.md §6.7", spec.Tools)
+	if len(spec.Tools) != len(ToolNames()) {
+		t.Fatalf("tools = %v, want exactly the tool surface", spec.Tools)
 	}
 	for _, forbidden := range []string{"graph_explore", "navigate_tree", "navigate_structure", "web_search", "calculate"} {
 		if contains(spec.Tools, forbidden) {
@@ -831,7 +831,7 @@ func TestRunToolsRespectsActionMaxTurns(t *testing.T) {
 }
 
 func TestRoundCallsAddsGrepLegsForMissingTerms(t *testing.T) {
-	calls := roundCalls([]string{"first query"}, []string{"GB/T 1234", "Qwen3-4B", "third term"})
+	calls := roundCalls([]string{"first query"}, []string{"GB/T 1234", "Qwen3-4B", "third term"}, nil)
 
 	// One hybrid leg plus at most maxGrepLegs literal probes.
 	if len(calls) != 1+maxGrepLegs {
@@ -849,7 +849,7 @@ func TestRoundCallsAddsGrepLegsForMissingTerms(t *testing.T) {
 }
 
 func TestRoundCallsSkipsBlankQueries(t *testing.T) {
-	if calls := roundCalls([]string{"  ", ""}, nil); len(calls) != 0 {
+	if calls := roundCalls([]string{"  ", ""}, nil, nil); len(calls) != 0 {
 		t.Fatalf("calls = %#v, want none", calls)
 	}
 }

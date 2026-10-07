@@ -87,7 +87,7 @@ func TestDecomposeWithoutAModelReturnsTheQuestion(t *testing.T) {
 
 func TestBuildCandidatesSkipsTriedCalls(t *testing.T) {
 	tried := ToolCall{Name: ToolHybridSearch, Arguments: map[string]any{"query": "q"}}
-	candidates := buildCandidates([]string{"q"}, []string{"term"}, nil, []attempt{{Call: tried}})
+	candidates := buildCandidates([]string{"q"}, []string{"term"}, nil, []attempt{{Call: tried}}, nil)
 
 	for _, candidate := range candidates {
 		if sameToolCall(candidate.Call, tried) {
@@ -110,7 +110,7 @@ func TestBuildCandidatesOffersDocumentsFromThePool(t *testing.T) {
 		{Chunk: store.Chunk{ChunkID: "c0", DocID: "a.pdf"}},
 		{Chunk: store.Chunk{ChunkID: "c1", DocID: "b.pdf"}},
 	}
-	candidates := buildCandidates([]string{"q"}, nil, evidence, nil)
+	candidates := buildCandidates([]string{"q"}, nil, evidence, nil, nil)
 	var listed []string
 	for _, candidate := range candidates {
 		if candidate.Call.Name == ToolListChunks {
@@ -131,7 +131,7 @@ func TestBuildCandidatesOffersDocumentsFromThePool(t *testing.T) {
 // with 100% of their evidence sitting in the index (docs/plan.md §13.19).
 func TestBuildCandidatesRefusesUndiscriminatingGreps(t *testing.T) {
 	missing := []string{"the", "of", "it", "AI", "information", "Anthropic"}
-	candidates := buildCandidates([]string{"a real query"}, missing, nil, nil)
+	candidates := buildCandidates([]string{"a real query"}, missing, nil, nil, nil)
 
 	var patterns []string
 	for _, candidate := range candidates {
@@ -147,11 +147,39 @@ func TestBuildCandidatesRefusesUndiscriminatingGreps(t *testing.T) {
 // The search candidates are untouched by the filter: a run whose only missing terms are
 // function words still has its queries to fall back on.
 func TestBuildCandidatesKeepsSearchesWhenEveryTermIsRefused(t *testing.T) {
-	candidates := buildCandidates([]string{"the query the rewriter produced"}, []string{"the", "and"}, nil, nil)
+	candidates := buildCandidates([]string{"the query the rewriter produced"}, []string{"the", "and"}, nil, nil, nil)
 
 	if len(candidates) != 1 || candidates[0].Call.Name != ToolHybridSearch {
 		t.Fatalf("candidates = %#v, want exactly the one search", candidates)
 	}
+}
+
+// A corpus that has a directory tree gets a route down it — and gets it
+// ALONGSIDE the hybrid search, because comparing the two is how a route into the
+// wrong folder is noticed. A corpus with no tree is offered no such call at all.
+func TestBuildCandidatesOffersTheDirectoryTreeOnlyWhenThereIsOne(t *testing.T) {
+	withTree := buildCandidates([]string{"q"}, nil, nil, nil, stubDirTree{has: true})
+	names := make([]string, 0, len(withTree))
+	for _, candidate := range withTree {
+		names = append(names, candidate.Call.Name)
+	}
+	if len(names) != 2 || names[0] != ToolHybridSearch || names[1] != ToolDirSearch {
+		t.Fatalf("candidates = %v, want the search and the tree route", names)
+	}
+
+	without := buildCandidates([]string{"q"}, nil, nil, nil, nil)
+	if len(without) != 1 || without[0].Call.Name != ToolHybridSearch {
+		t.Fatalf("candidates = %v, want only the search when there is no tree", without)
+	}
+}
+
+// stubDirTree stands in for the channel the kernel wires into a base's toolbox.
+type stubDirTree struct{ has bool }
+
+func (s stubDirTree) Has() bool { return s.has }
+
+func (s stubDirTree) Search(ctx context.Context, query string, limit int, explain bool) ([]store.Hit, string, error) {
+	return nil, "", nil
 }
 
 // ---- Laya tool choice ----
@@ -298,6 +326,14 @@ func TestFlowComplexPathFansOutAndSynthesizes(t *testing.T) {
 	}
 	if len(result.Evidence) == 0 {
 		t.Fatal("the fan-out gathered no evidence")
+	}
+	// The complex path reports the deepest sub-question's round count.
+	//
+	// It used to report zero, which reads as "no round ran" — and a validation
+	// script that checks `rounds >= 1` reported it as a failure of the
+	// retrieval rather than of the field.
+	if result.Rounds < 1 {
+		t.Fatalf("rounds = %d, want the sub-questions' depth", result.Rounds)
 	}
 }
 

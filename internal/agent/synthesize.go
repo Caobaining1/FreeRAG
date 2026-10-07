@@ -30,6 +30,11 @@ for them. Answer the ORIGINAL question in one well-organised reply:
 // With no model — or on a failed or empty call — it falls back to the evidence
 // itself, because a run that retrieved evidence must not end with an empty
 // answer just because the merge call failed.
+//
+// cfg is the REFRAG-style compression of refrag.go, applied to the merged pool
+// exactly as the simple path applies it (see renderEvidenceWith). The two paths
+// share the compression because they share the cost it targets: prefill over a
+// pool of passages, most of which the answer does not use.
 func synthesize(
 	ctx context.Context,
 	model Model,
@@ -38,15 +43,17 @@ func synthesize(
 	evidence []store.Hit,
 	members []Member,
 	maxChars int,
+	cfg RefragConfig,
 	onDelta func(string),
-) string {
+) (string, PromptStats) {
 	evidence = dedupeHits(evidence)
 
 	if model != nil {
+		prompt, stats := renderSynthesisPrompt(question, subQuestions, evidence,
+			RenderMemberRecord(question, members), maxChars, cfg)
 		messages := []Message{
 			{Role: RoleSystem, Content: synthesizeSystemPrompt},
-			{Role: RoleUser, Content: renderSynthesisPrompt(question, subQuestions, evidence,
-				RenderMemberRecord(question, members), maxChars)},
+			{Role: RoleUser, Content: prompt},
 		}
 
 		var (
@@ -59,11 +66,13 @@ func synthesize(
 			reply, err = model.Complete(ctx, messages, nil)
 		}
 		if err == nil && reply != nil && strings.TrimSpace(reply.Content) != "" {
-			return strings.TrimSpace(reply.Content)
+			stats.Usage = reply.Usage
+			return strings.TrimSpace(reply.Content), stats
 		}
+		return truncateRunes(fallbackSynthesis(evidence), DefaultExtractiveAnswerChars), stats
 	}
 
-	return truncateRunes(fallbackSynthesis(evidence), DefaultExtractiveAnswerChars)
+	return truncateRunes(fallbackSynthesis(evidence), DefaultExtractiveAnswerChars), PromptStats{}
 }
 
 // fallbackSynthesis renders the merged evidence when no model wrote an answer.
@@ -76,13 +85,25 @@ func fallbackSynthesis(evidence []store.Hit) string {
 }
 
 // renderSynthesisPrompt builds the merge call's user message.
+//
+// The compression is the same selective expand/compress as the simple path's
+// (refrag.go), applied to the merged pool: the highest-ranked passages stay
+// whole, the rest enter as a gist and keep their [n] markers. The merge pool is
+// the one place the compression has the most to work with — it is the union of
+// several sub-questions' retrievals, so most of it is there for a part of the
+// question the final answer barely touches.
 func renderSynthesisPrompt(
 	question string,
 	subQuestions []string,
 	evidence []store.Hit,
 	memberRecord string,
 	maxChars int,
-) string {
+	cfg RefragConfig,
+) (string, PromptStats) {
+	cfg = cfg.normalized()
+	stats := PromptStats{Passages: len(evidence)}
+	expand := refragPlan(evidence, cfg)
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "Original question: %s\n\n", question)
 
@@ -104,8 +125,8 @@ func renderSynthesisPrompt(
 	b.WriteString("Evidence:\n")
 	kept := 0
 	for i, hit := range evidence {
-		header := fmt.Sprintf("[%d] (%s p.%d) ", i+1, hit.Chunk.DocID, hit.Chunk.PageNum)
-		text := collapse(strings.TrimSpace(hit.Chunk.Text))
+		header, text, raw := renderPassage(hit, i, expand[i], cfg, &stats)
+		stats.EvidenceCharsRaw += raw
 		if maxChars > 0 {
 			room := maxChars - b.Len() - len(header) - 1
 			if room < 120 {
@@ -116,13 +137,15 @@ func renderSynthesisPrompt(
 			}
 		}
 		fmt.Fprintf(&b, "%s%s\n", header, text)
+		// Per passage, not the builder's length: see renderEvidenceWith.
+		stats.EvidenceChars += len(text)
 		kept++
 	}
 	if kept < len(evidence) {
 		fmt.Fprintf(&b, "\n(%d of %d passage(s) omitted to fit the context window.)\n",
 			len(evidence)-kept, len(evidence))
 	}
-	return b.String()
+	return b.String(), stats
 }
 
 // dedupeHits removes repeated chunks, keeping first-seen order.

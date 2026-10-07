@@ -81,7 +81,26 @@
           <ul id="documents" class="documents"></ul>
         </aside>
 
+        <!-- The right pane holds two views of the same documents: the CHUNKS one
+             document was cut into, and the TREE their structure was folded into.
+             They answer different questions — "what did the parser hand to
+             retrieval" versus "where in the document does this answer live" — so
+             they are a switch rather than a stack of panels competing for room. -->
         <section class="pane split">
+          <!-- A column inside the row pane: the mode switch belongs ABOVE both
+               views, and .split lays its children out side by side. -->
+          <div class="pane-right">
+          <div class="pane-tools">
+            <button id="mode-chunks" class="ghost active" type="button">分块</button>
+            <!-- The corpus directory tree: what the corpus was split into, and
+                 the only artefact this screen produces. Retrieval over it is not
+                 offered here — it belongs to the question, not to the tree, so
+                 it is answered in 问答, where a question is asked. -->
+            <button id="mode-dir" class="ghost" type="button">目录树</button>
+            <span class="spacer"></span>
+            <button id="dir-index" class="ghost" type="button" title="把整个语料聚成一棵目录树">重建目录树</button>
+          </div>
+
           <div id="inspect-empty" class="empty">
             <p>从左侧选一个文档，看它的分块，以及每一块来自原文的哪个位置。</p>
           </div>
@@ -120,6 +139,25 @@
               </div>
               <ul id="chunks" class="chunks"></ul>
             </div>
+          </div>
+
+          <!-- The corpus directory tree.
+               Built here and looked at here; searched only in 问答, because a
+               directory tree is not something a reader has a question about —
+               it is the shape a question is routed over. What this screen owes
+               the reader is the shape itself: which folders the corpus was
+               split into, how many documents each one holds, and which of them
+               the system invented rather than found. -->
+          <div id="dir-body" class="tree-pane hidden">
+            <div class="dir-bar">
+              <span id="dir-status" class="muted">…</span>
+              <span id="dir-stale" class="chip warn hidden"></span>
+              <span class="spacer"></span>
+              <span id="dir-ask-hint" class="muted"></span>
+            </div>
+
+            <div id="dir-tree" class="tree-lr"></div>
+          </div>
           </div>
         </section>
       </div>
@@ -232,8 +270,17 @@
         </label>
 
         <label class="field">
+          <span>图表识别方式</span>
+          <select id="settings-vision-backend">
+            <option value="general">通用视觉模型（描述整张图）</option>
+            <option value="chart">Laya-Chart（把统计图表转译成数据表）</option>
+          </select>
+        </label>
+
+        <label class="field">
           <span>视觉模型</span>
           <input id="settings-vision-model" type="text" autocomplete="off" />
+          <small class="muted" id="settings-vision-model-note"></small>
         </label>
 
         <label class="field">
@@ -250,6 +297,16 @@
           <span>裁剪图最长边（像素）</span>
           <input id="settings-vision-side" type="number" min="64" max="2048" />
         </label>
+
+        <!-- Two halves, and the difference is the reason this row exists: what
+             the machine offers, and what the models actually got. A machine can
+             offer an accelerator and still run on CPU because its runtime lacks
+             the provider, and that is silent everywhere except here. -->
+        <div class="field">
+          <span>硬件加速</span>
+          <p class="muted" id="settings-hardware">检测中…</p>
+          <button type="button" id="settings-hardware-rescan">重新扫描</button>
+        </div>
 
         <p class="muted" id="settings-note"></p>
 

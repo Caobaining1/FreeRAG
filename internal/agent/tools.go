@@ -11,20 +11,23 @@ import (
 	"freerag/internal/store"
 )
 
-// The four retrieval tools of docs/plan.md §6.7. They are complementary rather
-// than overlapping: hybrid_search covers "means the same", grep_search covers
-// "says exactly this", metadata_search covers "has these fields", and
-// list_chunks covers "what is in this document/page".
+// The retrieval tools of docs/plan.md §6.7, plus the directory tree. They are
+// complementary rather than overlapping: hybrid_search covers "means the same",
+// grep_search covers "says exactly this", dirtree_search covers "which document
+// in the corpus" by walking the tree the corpus was filed into,
+// metadata_search covers "has these fields", and list_chunks covers "what is in
+// this document/page".
 const (
 	ToolHybridSearch   = "hybrid_search"
 	ToolGrepSearch     = "grep_search"
+	ToolDirSearch      = "dirtree_search"
 	ToolListChunks     = "list_chunks"
 	ToolMetadataSearch = "metadata_search"
 )
 
 // ToolNames returns the tool surface in declaration order.
 func ToolNames() []string {
-	return []string{ToolHybridSearch, ToolGrepSearch, ToolListChunks, ToolMetadataSearch}
+	return []string{ToolHybridSearch, ToolGrepSearch, ToolDirSearch, ToolListChunks, ToolMetadataSearch}
 }
 
 // KnownTool reports whether name is part of the tool surface.
@@ -116,6 +119,32 @@ func ToolSpecs() []ToolSpec {
 					"k":       map[string]any{"type": "integer", "description": "max results (default 6)"},
 				},
 				"required": []string{"pattern"},
+			},
+		},
+		{
+			Name: ToolDirSearch,
+			Description: "WHEN TO CALL: the question is about WHICH DOCUMENT holds the answer and the " +
+				"knowledge base has a directory tree (built by fs.index; the tree is drawn on the 目录树 " +
+				"screen). It answers by descending the tree one folder at a time, so it can recall a " +
+				"document whose wording shares nothing with the question — which is the case hybrid_search " +
+				"and grep_search both fail on.\n" +
+				"DO NOT CALL: for one passage inside a document you already hold (list_chunks); for an exact " +
+				"string (grep_search); when the note says this knowledge base has no directory tree.\n" +
+				"ARGUMENTS: query — ONE string of 3-12 words: the entity plus what is asked about it. " +
+				"k — max documents, default 6.\n" +
+				"OUTPUT: whole documents, each represented by the passage inside it that matched the query " +
+				"best, with the folder path the route reached it through.\n" +
+				"IF IT FAILS: a route that opens the wrong folder returns documents from it, so re-run the " +
+				"same question with hybrid_search and compare — the two channels rank by different things, " +
+				"and seeing both is how a wrong folder is noticed. Empty with no directory tree is not a " +
+				"miss: it is this tool not applying to this knowledge base.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string", "description": "3-12 words: the entity plus what is asked about it"},
+					"k":     map[string]any{"type": "integer", "description": "max documents (default 6)"},
+				},
+				"required": []string{"query"},
 			},
 		},
 		{
@@ -258,6 +287,26 @@ type Toolbox struct {
 	// its results (see store.Filter), which is why it has to reach this far down
 	// instead of being sifted at the kbinfo.
 	filter store.Filter
+	// DirTree is the corpus directory tree channel, wired only for knowledge
+	// bases that have a tree. Nil means the channel does not exist here — which
+	// is a fact about the knowledge base, not a misconfiguration, so it is
+	// answered with a note rather than an error.
+	DirTree DirTree
+}
+
+// DirTree is the directory-tree retrieval channel.
+//
+// An interface rather than the concrete tree, so that this package keeps no
+// dependency on internal/dirtree: the agent needs to be able to run with no
+// tree at all, and a package-level import would make the tree's index a
+// requirement of every test in here.
+type DirTree interface {
+	// Has reports whether a tree exists for this knowledge base right now.
+	Has() bool
+	// Search routes one query down the tree and answers with whole documents,
+	// each represented by the passage in it that matched best. The returned
+	// string is a note for the trace: how many, and through which folders.
+	Search(ctx context.Context, query string, limit int, explain bool) ([]store.Hit, string, error)
 }
 
 // Execute runs one tool call with no document scope.
@@ -306,6 +355,8 @@ func (t *Toolbox) run(ctx context.Context, call ToolCall) (ToolResult, error) {
 		return t.hybridSearch(ctx, call), nil
 	case ToolGrepSearch:
 		return t.grepSearch(call)
+	case ToolDirSearch:
+		return t.dirSearch(ctx, call), nil
 	case ToolListChunks:
 		return t.listChunks(call), nil
 	case ToolMetadataSearch:
@@ -395,6 +446,48 @@ func (t *Toolbox) grepSearch(call ToolCall) (ToolResult, error) {
 		Hits: hits,
 		Note: fmt.Sprintf("%d chunk(s) matching %q%s", len(hits), pattern, t.scopeSuffix()),
 	}, nil
+}
+
+// dirSearch routes a question down the corpus directory tree.
+//
+// The hits it returns are documents, each carried by one real passage from
+// inside it, because the evidence pool is passages: a hit with no text could
+// not be cited, and a document retrieved without the sentence that earned it is
+// a claim the answer cannot be checked against.
+//
+// The scope is applied here and not inside the tree — the tree ranks folders,
+// not documents, and it has no notion of a filter. Dropping what the scope
+// excludes is the same rule every other retrieval tool follows.
+func (t *Toolbox) dirSearch(ctx context.Context, call ToolCall) ToolResult {
+	query, _ := stringArg(call.Arguments, "query")
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return ToolResult{Tool: call.Name, Note: "query is required"}
+	}
+	if t.DirTree == nil || !t.DirTree.Has() {
+		// Named, and with the next step: "this tool does not apply" is only
+		// useful to a model that is told what to call instead, and an empty
+		// result with no explanation would read as "the corpus has nothing".
+		return ToolResult{Tool: call.Name, Note:
+			"this knowledge base has no directory tree, so dirtree_search cannot run; call hybrid_search"}
+	}
+
+	hits, note, err := t.DirTree.Search(ctx, query, t.limit(call, "k"), true)
+	if err != nil {
+		return ToolResult{Tool: call.Name, Note: fmt.Sprintf(
+			"dirtree_search failed (%v); call hybrid_search", err)}
+	}
+	kept := make([]store.Hit, 0, len(hits))
+	for _, hit := range hits {
+		if !t.filter.Allows(hit.Chunk.DocID) {
+			continue
+		}
+		kept = append(kept, hit)
+	}
+	if note == "" {
+		note = fmt.Sprintf("%d document(s) for %q (directory tree route%s)", len(kept), query, t.scopeSuffix())
+	}
+	return ToolResult{Tool: call.Name, Hits: kept, Note: note}
 }
 
 func (t *Toolbox) listChunks(call ToolCall) ToolResult {

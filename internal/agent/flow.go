@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/compose"
 
@@ -28,6 +29,11 @@ type FlowDeps struct {
 	// MaxPromptChars bounds the evidence block handed to synthesis; <=0 selects
 	// PromptCharBudget(DefaultContextTokens).
 	MaxPromptChars int
+	// Refrag is the selective evidence compression applied to the merged pool on
+	// the complex path (refrag.go). The zero value is OFF. It is passed
+	// separately from Loop.Refrag, rather than read off Loop, so that the two
+	// paths cannot silently disagree about how the prompt was built.
+	Refrag RefragConfig
 	// OnStep receives top-level progress lines (routing, decompose, fan-out).
 	OnStep func(line string)
 	// OnAnswerDelta receives the final answer as it is written on the COMPLEX
@@ -58,7 +64,11 @@ type askState struct {
 	// what those elements are, taken from the first sub-question that enumerated.
 	Members  []Member
 	ItemKind string
-	Result   *Result
+	// Rounds is the deepest sub-question's SCA round count, carried from the
+	// fan-out to the result. The sub-loops run concurrently, so this is the
+	// slowest one's depth rather than a sum.
+	Rounds int
+	Result *Result
 }
 
 // Flow is the eino-compiled top-level orchestration:
@@ -227,6 +237,7 @@ func (f *Flow) fanoutNode(ctx context.Context, st *askState) (*askState, error) 
 		itemKind string
 		verdict  Verdict
 		missing  []string
+		rounds   int
 		failed   bool
 	}
 
@@ -269,7 +280,9 @@ func (f *Flow) fanoutNode(ctx context.Context, st *askState) (*askState, error) 
 				itemKind: result.ItemKind,
 				verdict:  result.Verdict,
 				missing:  result.Missing,
+				rounds:   result.Rounds,
 			}
+
 			f.step(fmt.Sprintf("[Q%d] retrieved: %d passage(s), verdict=%s.",
 				i+1, len(result.Evidence), result.Verdict))
 		}(i, sub)
@@ -284,7 +297,17 @@ func (f *Flow) fanoutNode(ctx context.Context, st *askState) (*askState, error) 
 	// two citations, and the answer cites by index.
 	merged := newKBInfo()
 	var memberGroups [][]Member
+	// The run's round count is the deepest sub-question's, not the sum and not
+	// the first: the sub-loops run CONCURRENTLY, so the wall clock is the
+	// slowest one and "how many SCA rounds did this take" has no single answer
+	// other than that. Left at zero it read as "no round ran", which is what a
+	// validation script checked — and reported as a failure of the retrieval
+	// rather than of the field.
+	maxRounds := 0
 	for i, result := range results {
+		if result.rounds > maxRounds {
+			maxRounds = result.rounds
+		}
 		if len(result.members) > 0 {
 			memberGroups = append(memberGroups, result.members)
 			if st.ItemKind == "" {
@@ -304,6 +327,7 @@ func (f *Flow) fanoutNode(ctx context.Context, st *askState) (*askState, error) 
 		merged.add(result.evidence)
 	}
 	st.Evidence = merged.pool()
+	st.Rounds = maxRounds
 	// Merged by name, and only from sub-questions that finished: a sub-loop that
 	// failed has no members to contribute, and one that did not declare a set has
 	// none either — so this is empty for every run that is not an enumeration.
@@ -334,8 +358,15 @@ func (f *Flow) synthesizeNode(ctx context.Context, st *askState) (*askState, err
 	// Same reason as decompose: the merge is a silent model call, and the answer
 	// only starts streaming once it begins writing.
 	f.step("[Synthesize] writing the answer from the merged pool…")
-	answer := synthesize(ctx, f.deps.Model, st.Question, st.SubQuestions,
-		st.Evidence, st.Members, maxChars, f.deps.OnAnswerDelta)
+	started := time.Now()
+	answer, stats := synthesize(ctx, f.deps.Model, st.Question, st.SubQuestions,
+		st.Evidence, st.Members, maxChars, f.deps.Refrag, f.deps.OnAnswerDelta)
+	// Timed and reported, like the simple path's [Answer] line. This call is
+	// the complex path's whole generation, and it is where a prompt-side change
+	// shows up — without the line, an end-to-end A/B on the complex path has no
+	// number that is about the answer rather than about the retrieval.
+	f.step(fmt.Sprintf("[Synthesize] written in %s (%d char(s)).",
+		time.Since(started).Round(100*time.Millisecond), len([]rune(answer))))
 
 	// The flow-level verdict answers one question only: did every sub-question
 	// reach SUFFICIENT on its own pool? It is not a fresh judgement over the
@@ -352,6 +383,7 @@ func (f *Flow) synthesizeNode(ctx context.Context, st *askState) (*askState, err
 		Mode:          f.deps.Loop.spec().Label,
 		Route:         st.Route,
 		Verdict:       verdict,
+		Rounds:        st.Rounds,
 		SubQuestions:  st.SubQuestions,
 		NotSufficient: st.NotSufficient,
 		Answer:        answer,
@@ -366,6 +398,10 @@ func (f *Flow) synthesizeNode(ctx context.Context, st *askState) (*askState, err
 		ItemKind:    st.ItemKind,
 		Members:     st.Members,
 	}
+	// After the literal, not before it: st.Result is replaced here, and setting
+	// the stats on the previous result would record them on an object that is
+	// then thrown away.
+	setPromptStatsOn(st.Result, &stats)
 	return st, nil
 }
 

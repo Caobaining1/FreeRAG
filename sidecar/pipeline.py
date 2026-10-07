@@ -109,10 +109,11 @@ def _document_blocks(path: str, source_file: str) -> Dict[str, Any]:
     zero-width box as "nothing to judge" and lets the run continue, which is
     exactly the behaviour a reflowable document wants.
     """
-    paragraphs = documents.load_paragraphs(path)
+    # Not `load_paragraphs`: that drops the heading's depth, and without it every
+    # Markdown heading becomes a sibling of every other one.
     blocks = [
-        Block(text=text, page_num=1, block_type=block_type, source_file=source_file)
-        for block_type, text in paragraphs
+        Block(text=text, page_num=1, block_type=block_type, source_file=source_file, level=level)
+        for block_type, text, level in documents.load_blocks(path)
     ]
     return {
         "blocks": blocks,

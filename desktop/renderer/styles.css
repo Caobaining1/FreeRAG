@@ -1227,3 +1227,250 @@ button.tiny {
 .field.check span {
   flex: 1;
 }
+
+/* ---- retrieval through the structure tree ----
+   The right pane switches between one document's chunks and the corpus routed
+   through its own structure. A mode row rather than nested panes: both views are
+   about the same documents, and hiding one behind the other is how a reader ends
+   up quoting a route they did not take. */
+
+/* The column that holds the mode switch and whichever view is showing. */
+.pane-right {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.pane-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding-bottom: 2px;
+}
+
+.pane-tools .spacer {
+  flex: 1;
+}
+
+/* The same toggle either way round: which mode is selected is a fact about one
+   button, not a highlight the other one lost. */
+.pane-tools button.active {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
+/* The directory tree's whole screen: one line of status, then the tree taking
+   every pixel that is left. */
+.tree-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dir-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  font-size: 11.5px;
+}
+
+/* ---- the corpus tree, drawn left to right ---- */
+
+.tree-lr {
+  flex: 1;
+  min-height: 200px;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+/* One node: the card, then — to its right — whatever it opens onto. The
+   horizontal axis is depth, the same way it is in a file browser. */
+.tl-node {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-left: 26px;
+}
+
+/* The stub from the parent's spine to this card. */
+.tl-node::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 26px;
+  height: 1px;
+  background: var(--line-strong);
+}
+
+.tl-root {
+  padding-left: 0;
+}
+
+.tl-root::before {
+  display: none;
+}
+
+/* Children form a column to the right of their parent's card; the spine runs
+   down its left edge and every child taps into it. */
+.tl-children {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  margin-left: 16px;
+  padding-left: 26px;
+}
+
+.tl-children::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.tl-card {
+  position: relative;
+  flex: none;
+  width: 210px;
+  padding: 7px 10px 9px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.tl-card:hover {
+  border-color: var(--accent-line);
+}
+
+/* Opened, or on the route the last search walked. The second is the one that
+   ties this picture to the route map above it. */
+.tl-card.open {
+  border-left-color: var(--accent);
+}
+
+.tl-mark {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.tl-card.open .tl-mark {
+  color: var(--accent);
+}
+
+.tl-name {
+  display: block;
+  padding-right: 14px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-soft);
+  word-break: break-word;
+}
+
+.tl-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* The folder's share of the corpus, at the bottom edge of the card. */
+.tl-bar {
+  display: block;
+  margin-top: 6px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--sunken);
+  overflow: hidden;
+}
+
+.tl-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--accent-mark);
+}
+
+.tl-tag {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--warn-line);
+  color: var(--warn);
+  font-size: 10px;
+}
+
+/* A document, not a folder: dashed, and narrower, so a leaf is not mistaken
+   for another branch to open. */
+.tl-file {
+  flex: none;
+  width: 190px;
+  padding: 5px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  background: var(--sunken);
+  cursor: pointer;
+}
+
+.tl-file:hover {
+  border-color: var(--accent-line);
+}
+
+.tl-file .tl-name {
+  font-size: 11.5px;
+}
+
+/* The box an empty tree is announced in, and nothing else now: there is one
+   artefact on this screen, so there is nothing left for it to compete with. */
+.map {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.map > summary {
+  padding: 7px 11px;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+/* ---- empty states ---- */
+
+.map-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px;
+}
+
+.map-empty-text {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+

@@ -70,8 +70,8 @@
 | 分块 + 超短块合并/挂靠/丢弃 | ✅ | `sidecar/chunking.py` |
 | **混合检索：BM25 + 向量 + RRF** | ✅ 实测中文查询打英文论文：BM25 0 命中 → 混合 5 命中 | `internal/store/` |
 | 嵌入（BGE-M3，1024 维） | ✅ **托管接口，已决定长期如此**（见 §0.3.1） | `internal/embed/` |
-| 4 个检索工具 | ✅ 全部有测试 | `internal/agent/tools.go` |
-| **模型驱动的工具选择** | ✅ 模型在 4 个工具里自选；未知工具名剔除、失败回退确定性计划。实测选对 `metadata_search(block_type=Table, page=3)` | `internal/agent/loop.go`、`internal/agent/ollama.go` |
+| 5 个检索工具 | ✅ 全部有测试 | `internal/agent/tools.go` |
+| **模型驱动的工具选择** | ✅ 模型在 5 个工具里自选；未知工具名剔除、失败回退确定性计划。实测选对 `metadata_search(block_type=Table, page=3)` | `internal/agent/loop.go`、`internal/agent/ollama.go` |
 | **进度通知** | ✅ `ipc.Server.Notify`（无 id 的 JSON-RPC 通知）；`index` / `ask` 逐阶段上报：hash / skipped / parse / parsed / stored / persisted / agent | `internal/ipc/jsonrpc.go` |
 | **文档管理 RPC** | ✅ `documents`（含 md5/页数/索引时间/实际 chunk 数）、`forget`、`status`（各子系统健康 + 哪些没探测） | `cmd/freerag/main.go` |
 | **分块检查器 RPC** | ✅ `chunks`（分块 + **bbox（页内 PDF 点）** + 每页块数 + 总数）、`page`（原文某页渲染成 PNG + 页尺寸 pt） | `cmd/freerag/main.go`、`internal/parser/service.go`、`sidecar/parse_server.py` |
@@ -708,7 +708,7 @@ key = md5(位图)
 | UseFanout | **false** | **无 planner、无 prefetch** |
 | ActionMaxTurns | 8 | 单个 session 最多 8 轮工具调用 |
 | SnippetsPerQuery | 6 | 单查询最多读 6 条命中 |
-| Tools | **4 个** | `hybrid_search` / `grep_search` / `list_chunks` / `metadata_search`（本项目定制，见 §6.7） |
+| Tools | **5 个** | `hybrid_search` / `grep_search` / `dirtree_search` / `list_chunks` / `metadata_search`（本项目定制，见 §6.7） |
 
 ### 6.2 图结构（`BuildAgenticGraph`，`agentic_rag_graph.go:1490`）
 
@@ -750,7 +750,7 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 ### 6.5 本项目初期简化
 
 - **slot 表**：medium 仍由 `RunSlotResearchPass` 内部的 `initialize_state` 拆 slot（`st.SlotTable`，`:564`）。本项目可先**单 slot（整问一槽）**跑通循环，再启用多 slot 分解。
-- **工具面固定为 4 个**：`hybrid_search` / `grep_search` / `list_chunks` / `metadata_search`（见 §6.7）。RAGFlow 的 `navigate_tree` / `navigate_structure` / `calculate` / `graph_explore` 需要编译出的目录树 / 知识图谱等额外结构，**不引入**。
+- **工具面固定为 5 个**：`hybrid_search` / `grep_search` / `dirtree_search` / `list_chunks` / `metadata_search`（见 §6.7）。RAGFlow 的 `navigate_tree` / `navigate_structure` / `calculate` / `graph_explore` 需要编译出的目录树 / 知识图谱等额外结构，**不引入**（`dirtree_search` 不在其列：它走的是 `fs.index` 生成的语料目录树，不是文档内部结构树，且无树的知识库在调用时如实回绝，不伪装成"没命中"）。
 - **不做 web_search**：纯本地场景，无须该工具，也就不存在"无 provider 时是否广告"的问题。
 
 ### 6.6 Laya 输入策略：只喂 draft
@@ -767,23 +767,24 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 - Laya 无法核验 draft 是否被证据支持，存在"draft 看似完整实为幻觉 → 误判 SUFFICIENT"的风险。
 - 缓解：draft 生成 prompt 强制带引用标记（`[n]`）；可选把**引用标记密度/覆盖度**作为弱特征一并喂给 Laya（仍是短输入），作为充分性的补充信号。
 
-### 6.7 工具面：4 个检索工具（本项目定制）
+### 6.7 工具面：5 个检索工具（本项目定制）
 
-初期固定 4 个工具，覆盖"语义召回 / 精确匹配 / 结构浏览 / 字段过滤"四种检索意图。
+初期固定 5 个工具，覆盖"语义召回 / 精确匹配 / 目录路由 / 结构浏览 / 字段过滤"五种检索意图。
 
 | 工具 | 用途 | 参数 | 返回 |
 | :--- | :--- | :--- | :--- |
 | `hybrid_search` | 语义 + 关键词混合召回，主力检索 | `query`, `k?` | top-k chunk（score / doc / page / block_type） |
 | `grep_search` | 字面 / 正则精确匹配：术语、编号、专有名词、代号 | `pattern`, `regex?`, `k?` | 命中行及所属 chunk |
+| `dirtree_search` | 沿语料目录树逐层下钻，回答"哪一篇"（2026-10-06 加入）。**仅对已生成目录树的知识库开放**，无树时回绝并指明改用什么 | `query`, `k?` | 命中的文档，各带一条最匹配的原文 chunk 与到达它的目录路径 |
 | `list_chunks` | 按 `doc_id`（+`page`）顺序枚举，用于浏览结构与回读原文 | `doc_id?`, `page?`, `offset?`, `limit?` | chunk 列表（分页） |
 | `metadata_search` | 按 metadata 字段过滤（不依赖全文匹配）。**只有两个字段**（2026-09-29 收窄，见下方补记） | `filters: [{key, op, value}]`（`key` ∈ `doc_id` \| `indexed_at`）、`logic?`, `limit?` | 匹配的 chunk 列表 |
 
 设计要点：
 
-- **互补而非重叠**：`hybrid_search` 管"意思像"，`grep_search` 管"字面有"，`metadata_search` 管"字段是"，`list_chunks` 管"这篇/这页有什么"。
+- **互补而非重叠**：`hybrid_search` 管"意思像"，`grep_search` 管"字面有"，`dirtree_search` 管"哪一篇"，`metadata_search` 管"字段是"，`list_chunks` 管"这篇/这页有什么"。
 - **`grep_search` 的独有价值**：BM25 / 向量对编号（`GB/T 1234`）、代号（`Qwen3-4B`）、罕见专名召回差，字面匹配能补上。
 - **`list_chunks` 是安全网**：配合 §6.6"只喂 draft"，模型失去回看原文的能力；`list_chunks` 让它按页回读（对应 RAGFlow 的无损 `Kbinfos` 证据池）。
-- **预算**：4 个工具的调用合计仍受 `ActionMaxTurns = 8` 约束（§6.1）。
+- **预算**：5 个工具的调用合计仍受 `ActionMaxTurns = 8` 约束（§6.1）。
 - **职责边界**：工具只负责取证据；`draft` 由生成 LLM 产出、`verdict` 由 Laya 给（§6.3 / §6.6）。
 - **`metadata_search` 收窄为两个字段（2026-09-29 补记）**：移除 `block_type` / `page` / `source_file`，改为 `filters: [{key, op, value}]`，`key` 为 enum（`doc_id` / `indexed_at`），算子整set沿用 RAGFlow 语义，时间按 RAGFlow 规则用 `start with`。
   - **动机（实证）**：`doc_id` 原是自由字符串、描述只有 "document id"。问「赵慧为作者的论文有哪些」时，模型**编造**了一个取值 `doc_id=author_zhao_hui`（一个长得像作者键的假 doc_id）→ 0 命中 → SCA 判 SUFFICIENT → 第 1 轮退出 → 答案「没有关于赵慧为作者的论文信息」。而**库里 5 篇论文赵慧（Hui Zhao，华东师大）全是作者**。用拼音问**逐字复现**同样三步。
@@ -981,10 +982,10 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 - [ ] 实现模型**动态加载/卸载**调度。
 
 ### Phase 2 — Go 内核
-- [x] 工具面（4 个，见 §6.7）：`hybrid_search` / `grep_search` / `list_chunks` / `metadata_search`。→ 全部实现并有测试。
+- [x] 工具面（5 个，见 §6.7）：`hybrid_search` / `grep_search` / `dirtree_search` / `list_chunks` / `metadata_search`。→ 全部实现并有测试。
 - [x] 向量检索接口封装。→ **BM25 + BGE-M3 向量 + RRF 融合**（`internal/store`）。注意：表格目前只入库 Markdown 一份，**"HTML + 描述文本双份索引"未做**（依赖 TSR）。
 - [x] 上下文组装（Prompt 准备，控制 4K–8K tokens）。→ 显式 `num_ctx` + `PromptCharBudget` 字符预算护栏。
-- [~] Agentic Loop 编排（详见 §6）：`formalize_question → rag_agent(session → draft → sca) ⇄ query_rewrite`。→ 循环已实现并验收；**SCA 已换成真实 Laya**（`sidecar/laya.py`，实测第 3 题 2 轮 280s → 1 轮 76s）。**工具选择已改为模型驱动**（2026-09-29）：模型在 4 个工具里自选，未知工具名被剔除并回退确定性计划（`internal/agent/loop.go` 的 `planTools`）。
+- [~] Agentic Loop 编排（详见 §6）：`formalize_question → rag_agent(session → draft → sca) ⇄ query_rewrite`。→ 循环已实现并验收；**SCA 已换成真实 Laya**（`sidecar/laya.py`，实测第 3 题 2 轮 280s → 1 轮 76s）。**工具选择已改为模型驱动**（2026-09-29）：模型在 5 个工具里自选，未知工具名被剔除并回退确定性计划（`internal/agent/loop.go` 的 `planTools`）。
 - [ ] 文件调度与批量解析队列（分批 + 阶段重叠）。→ 见 §0.1 P2-7。
 
 ### Phase 3 — 本地推理服务 + 模型自动下载
@@ -1127,7 +1128,7 @@ RAGFlow 用**同一个生成模型**做路由与 SCA；本项目把这两处**�
 2. **"空池从不通融"**：`loop.go` 里池为空即 INSUFFICIENT 的分支（实测防止过"语料没有"这类假结论）。
 3. **引用与锚定**：成员必须锚定到 passage；答案只能引用证据里的 `[n]`。
 4. **`DecisionKind` 契约**：路由/工具选择=`choice`、SCA=`noul`（§7 那行事故的回归测试）。
-5. **工具面**：仍是 4 个（§6.7）；不允许通过加工具绕过检索困难。
+5. **工具面**：仍是 5 个（§6.7）；不允许通过加工具绕过检索困难。
 6. **拒答行为**：`queries_null.json` 上的拒答率是守卫而非优化目标。
 
 **为什么把第 2/3/6 条写成硬守卫**：它们都能被"提高 RAGAS"的梯度反向优化掉——
@@ -1827,3 +1828,45 @@ refusals = sum(1 for r in null_rows if REFUSAL.search(r.get("answer", "")))
 **教训（与看门狗那条同源）**：这次的三个 bug 全是"**机制看着在动、其实没在做那件事**" ✗ ——
 超时没生效 ✗、戳选了会被无关提交扰动的东西 ✗、基线测在了错的时刻 ✗。
 三者都**没有报错** ✗，只能靠**读进程、读戳、读基线内容**发现 ✓。
+
+### 13.28 更正：`temperature=0` 在此之前从未生效（2026-10-05）
+
+**同一条教训的第四个实例，而且它打在前三个的结论上。**
+
+`internal/agent/ollama.go` 的请求体里，温度是这样下发的：
+
+```go
+if m.Temperature > 0 { options["temperature"] = m.Temperature }   // ✗ 0 被吃掉
+```
+
+于是 `FREERAG_GENERATION_TEMPERATURE=0` —— §13.17 定下的**"评测一律以 0 启动"**那条纪律所设的值 ——
+**从来没到过服务端**，实际采样温度是 Ollama 的默认 **0.8**。
+
+**怎么发现的**：不是在读代码时，而是在为 §10（REFRAG 压缩）做端到端 A/B 时——
+同一道题、同一个臂、同一个库，两次运行的**证据池在 44,218 与 71,644 字符之间跳** ✗
+（池 25 vs 35）。追下去是查询改写每次不同，而改写是生成模型的一次调用。
+
+**它使下面这些结论需要重看**（本文不替它们辩护，只标注）：
+
+| 结论 | 为什么受影响 |
+| :--- | :--- |
+| §13.16 噪声带 0.0063 → 更正为 0.0793 | 那次更正归因于"温度 0.2 的采样器" ✗；**0.2 确实生效**，但"温度 0 的对照"其实也是 0.2 以上 |
+| §13.17 "温度 0 把带宽从 0.0793 降到 0.0271" ✗ | 若 0 从未生效，**两次测量都在服务端默认温度下**，那个下降另有来源或本身就是噪声 |
+| §13.18 的"归属"（faithfulness 差 0.0002 = 生成端已确定）✗ | 生成端当时并不确定；那 0.0002 是**两次恰好抽得一样**，不是确定性 |
+| 所有"0° 下接受、0.2° 下复核"的判决 | 前半个条件不存在，**筛选与判决实际上在同一温度下** |
+
+**修法**：把"未设"与"设成 0"分开——`Temperature < 0` 才表示"用服务端默认"，
+**`0` 就是贪心**，零值也按 0 下发。测试两条锁死（`TestOllamaSendsZeroTemperature` /
+`TestOllamaOmitsTemperatureWhenNegative`）。
+
+**修完的立即复测**（同题 × 同臂 × 2 遍，`eval/runs/refrag-stream.jsonl`）：
+四个样本的证据池、提示词 token、答案长度（1259 字符 / 228 token）**逐字节相同**，
+只剩时间戳在动 ✓。**修复前的"可复现"是运气，修复后的才是性质。**
+
+**修订后的纪律**（补 §13.17 的"旋钮必须先证明是活的"）：
+
+> **一个旋钮有三种坏法**：接在死代码上（§13.17 的 `defaultToolLimit`）✓、
+> 值在到达边界前被守卫吃掉（本条）✓、以及**接了但语义反了**。
+> 前两种的表现都是"**看起来在受控条件下测量**" ✗ —— 比没有这个旋钮更坏。
+> 因此设过旋钮之后，**要在对端确认它到了**（本条的检查方式就是看服务端实际采样出的两个分支），
+> 而不是看自己这边把它设成了什么 ✓。
