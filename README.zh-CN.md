@@ -4,6 +4,12 @@
 
 > [English](README.md) · 设计文档 [docs/plan.md](docs/plan.md)
 
+[![下载](https://img.shields.io/github/v/release/Caobaining1/FreeRAG?label=下载&color=blue)](https://github.com/Caobaining1/FreeRAG/releases/latest)
+
+## 下载
+
+预构建安装包（Linux AppImage、macOS dmg）发布在 [GitHub Releases](https://github.com/Caobaining1/FreeRAG/releases/latest)。下载打开即可用，无需再拉任何东西——Ollama 与模型集已随包内置（路线 A）。Windows 打包暂未自包含，需从源码用 [scripts/build-installer.sh](scripts/build-installer.sh) 构建。
+
 ## 界面
 
 ![知识库与文档管理](docs/screenshots/01-library.png)

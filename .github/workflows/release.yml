@@ -1,0 +1,85 @@
+name: release
+
+# Builds desktop installers for every platform and attaches them to a GitHub
+# Release, so the project page offers a direct download link
+# (Releases in the sidebar, or /releases/latest).
+#
+# Route A is why this works without a manual setup step for the downloader:
+# build-installer.sh bundles the Go kernel, the vendored Python runtime, Qdrant,
+# the Ollama binary and the model set, and the desktop shell imports
+# freerag-qwen3 on first launch.
+#
+# Triggered by pushing a tag like v0.1.0, or manually from the Actions tab.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to create a release and upload assets
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: dist/*.AppImage
+          - os: macos-latest
+            artifact: dist/*.dmg
+          # Windows packaging is not yet self-contained: there is no Qdrant
+          # Windows asset and Ollama cannot be vendored from its installer EXE
+          # (scripts/vendor-ollama.sh documents the gap). Kept here as an
+          # informative, non-blocking build until those gaps close.
+          - os: windows-latest
+            artifact: dist/*.exe
+            continue-on-error: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Build a real installer (not --dir): AppImage / dmg / nsis exe. The
+      # Actions runner reaches HuggingFace directly, so bypass the dev mirror.
+      - name: build installer
+        shell: bash
+        env:
+          HF_ENDPOINT: https://huggingface.co
+          GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
+        run: bash scripts/build-installer.sh
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freerag-${{ matrix.os }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: ignore
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    # Only cut a release from a tag push; a manual dispatch just leaves the
+    # artifacts in the Actions run for inspection.
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

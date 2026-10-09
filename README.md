@@ -4,6 +4,12 @@ A local-first desktop Agentic RAG system: every model runs on your machine, and 
 
 > **中文优先** — see [README.zh-CN.md](README.zh-CN.md). Design notes: [docs/plan.md](docs/plan.md).
 
+[![Download](https://img.shields.io/github/v/release/Caobaining1/FreeRAG?label=Download&color=blue)](https://github.com/Caobaining1/FreeRAG/releases/latest)
+
+## Download
+
+Prebuilt installers (Linux AppImage, macOS dmg) are published as [GitHub Releases](https://github.com/Caobaining1/FreeRAG/releases/latest). Download, open, and the app fetches nothing else — Ollama and the model set ship inside (Route A). Windows packaging is not yet self-contained; build it from source with [scripts/build-installer.sh](scripts/build-installer.sh).
+
 ## Screenshots
 
 ![Library](docs/screenshots/01-library.png)
