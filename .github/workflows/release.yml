@@ -21,6 +21,9 @@ permissions:
   contents: write   # required to create a release and upload assets
 
 jobs:
+  # Core, self-contained installers. These gate the release: as soon as both
+  # finish, publish cuts the GitHub Release with the AppImage + dmg, so a slow
+  # Windows signing run never holds up the Linux/macOS download.
   package:
     strategy:
       fail-fast: false
@@ -30,15 +33,6 @@ jobs:
             artifact: dist/*.AppImage
           - os: macos-latest
             artifact: dist/*.dmg
-          # Windows packaging is not yet self-contained: there is no Qdrant
-          # Windows asset and Ollama cannot be vendored from its installer EXE
-          # (scripts/vendor-ollama.sh documents the gap), so the built app needs
-          # Qdrant + Ollama on PATH to actually run. We still ship a portable 7z
-          # (electron-builder `portable` target, a self-extractor with no NSIS
-          # step) as an informative, non-blocking artifact until those gaps close.
-          - os: windows-latest
-            artifact: dist/*.exe
-            continue-on-error: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +44,7 @@ jobs:
         with:
           node-version: '20'
 
-      # Build a real installer (not --dir): AppImage / dmg / nsis exe.
+      # Build a real installer (not --dir): AppImage / dmg.
       # Leave HF_ENDPOINT unset: download-models.sh defaults to hf-mirror.com,
       # which is what serves the gated Qwen3-4B GGUF without a token. Setting it
       # to huggingface.co makes that download 401 and aborts the build.
@@ -67,6 +61,40 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: ignore
 
+  # Windows is built separately and does NOT gate the release. It is not yet
+  # self-contained: there is no Qdrant Windows asset and Ollama cannot be vendored
+  # from its installer EXE (scripts/vendor-ollama.sh documents the gap), so the
+  # built app needs Qdrant + Ollama on PATH to actually run. We still ship a
+  # portable 7z (electron-builder `portable` target, a self-extractor with no
+  # NSIS step) as an informative, non-blocking artifact.
+  package-win:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: build installer
+        shell: bash
+        env:
+          GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
+        run: bash scripts/build-installer.sh
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freerag-windows-latest
+          path: dist/*.exe
+          if-no-files-found: ignore
+
+  # Cut the release from the core platforms only. Windows is attached separately
+  # once its (slower) build lands.
   publish:
     needs: package
     runs-on: ubuntu-latest
@@ -86,3 +114,32 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Append the Windows portable build to the release that publish just cut.
+  # Non-blocking: if the Windows build fails, this is skipped and the release
+  # still ships with AppImage + dmg.
+  publish-win:
+    needs: package-win
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    continue-on-error: true
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: freerag-windows-latest
+          path: win-artifacts
+          merge-multiple: true
+          if-no-files-found: ignore
+
+      - name: attach windows artifact to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          files=(win-artifacts/*.exe)
+          if [ "${#files[@]}" -gt 0 ]; then
+            gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber
+          else
+            echo "no windows artifact produced; skipping attach"
+          fi
