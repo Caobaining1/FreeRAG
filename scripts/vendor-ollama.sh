@@ -97,7 +97,7 @@ if [[ "$OS" == "darwin" ]]; then
   unpack() {
     local tmp; tmp="$(mktemp -d)"
     unzip -q -o "$PART" -d "$tmp"
-    local src; src="$(find "$tmp" -name ollama -type f -path '*Contents/Resources*' | head -1)"
+    local src; src="$(find "$tmp" -name ollama -type f | head -1)"
     if [[ -z "$src" ]]; then echo "ollama binary not found in $ASSET" >&2; return 1; fi
     mkdir -p "$DEST"
     cp "$src" "$OLLAMA_BIN"

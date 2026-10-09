@@ -75,13 +75,19 @@ say "4. vendor the Python runtime"
 # cannot parse a new one, because the sidecar's dependencies are not on a clean
 # machine. Kept as a separate script: it downloads ~27 MB and builds a ~258 MB
 # tree, so it should be runnable on its own while iterating on the sidecar.
-bash "$ROOT/scripts/fetch-python-runtime.sh"
+bash "$ROOT/scripts/fetch-python-runtime.sh" || { echo "fetch-python-runtime.sh failed" >&2; exit 1; }
 
 say "5. vendor Ollama"
 # Route A: the inference runtime ships with the app. desktop/main.js spawns it
 # on first launch and imports freerag-qwen3 from the bundled GGUF, so there is
 # no separate Ollama install for the user to perform.
-bash "$ROOT/scripts/vendor-ollama.sh"
+bash "$ROOT/scripts/vendor-ollama.sh" || { echo "vendor-ollama.sh failed" >&2; exit 1; }
+
+say "5b. dump vendored tree (diagnostics)"
+ls -la "$VENDOR"           2>&1 || true
+ls -la "$VENDOR/python"    2>&1 || true
+ls -la "$VENDOR/ollama"    2>&1 || true
+df -h "$ROOT"              2>&1 || true
 
 say "6. check the sidecar and models are present"
 MISSING=0
