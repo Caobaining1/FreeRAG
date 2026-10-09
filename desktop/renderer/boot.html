@@ -1,0 +1,48 @@
+<!doctype html>
+<!--
+  Shown only on the first launch, while the model set is fetched.
+
+  The model set is ~4.4 GB and is downloaded rather than bundled: a GitHub
+  release asset is capped at 2 GB, so an installer carrying the models could
+  not be published at all. main.js drives this page through setBoot().
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>freerag</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #1b1d21;
+      color: #e6e6e6;
+      font: 14px system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+    }
+    .box { width: 420px; text-align: center; }
+    h1 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
+    p { margin: 0 0 18px; color: #a0a4ab; font-size: 13px; line-height: 1.6; }
+    .bar { height: 6px; border-radius: 3px; background: #2c2f36; overflow: hidden; }
+    .fill { height: 100%; width: 0; background: #4a9eff; transition: width .2s ease; }
+    .note { margin-top: 12px; font-size: 12px; color: #8b8f97; min-height: 16px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>freerag 首次启动准备</h1>
+    <p>正在下载本地模型（约 4.4 GB）。只需这一次，之后启动不再下载。<br>请保持联网。</p>
+    <div class="bar"><div class="fill" id="fill"></div></div>
+    <div class="note" id="note">准备中…</div>
+  </div>
+  <script>
+    window.setBoot = function (text, pct) {
+      var fill = document.getElementById('fill');
+      var note = document.getElementById('note');
+      if (fill) fill.style.width = Math.max(0, Math.min(100, pct || 0)) + '%';
+      if (note && text) note.textContent = text;
+    };
+  </script>
+</body>
+</html>

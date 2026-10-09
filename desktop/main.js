@@ -62,7 +62,15 @@ function resolveRuntime() {
   return {
     installed,
     bin: installed ? path.join(resources, 'bin') : path.join(dev, 'bin'),
-    models: installed ? path.join(resources, 'models') : path.join(dev, 'models'),
+    // Not bundled: the model set is ~4.4 GB, and a GitHub release asset is
+    // capped at 2 GB, so shipping it inside the installer is not possible.
+    // Installed, it lives in the user data dir — writable, and filled by
+    // ensureModels() on the first launch.
+    models: installed ? path.join(app.getPath('userData'), 'models') : path.join(dev, 'models'),
+    // The fetcher itself is bundled, so the first launch needs only a network.
+    downloadModels: installed
+      ? path.join(resources, 'scripts', 'download-models.sh')
+      : path.join(dev, 'scripts', 'download-models.sh'),
     sidecar: installed ? path.join(resources, 'sidecar') : path.join(dev, 'sidecar'),
     qdrant: installed ? path.join(resources, 'bin', 'qdrant') : path.join(dev, '.toolchain', 'qdrant', 'qdrant'),
     // Installed, this is the interpreter vendored by fetch-python-runtime.sh,
@@ -950,6 +958,139 @@ function resolveTheme() {
   return { theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light', source: 'system' };
 }
 
+/**
+ * Model files the app cannot do its job without.
+ *
+ * Checked rather than assumed now that the set is fetched on first launch: an
+ * interrupted download leaves a partial file behind, and pretending that is a
+ * complete model produces a kernel that fails far from the cause.
+ */
+const REQUIRED_MODELS = [
+  path.join('deepdoc', 'layout.onnx'),
+  path.join('deepdoc', 'tsr.onnx'),
+  path.join('laya-onnx', 'laya.onnx'),
+  path.join('qwen3-4b', 'Qwen3-4B-Q4_K_M.gguf'),
+];
+
+function modelsPresent(dir) {
+  return REQUIRED_MODELS.every((rel) => fs.existsSync(path.join(dir, rel)));
+}
+
+let bootWin = null;
+
+/**
+ * Small window shown only while the first launch downloads the model set.
+ *
+ * Without it the app spends several minutes with nothing on screen, which reads
+ * as a hang: the main window is created late, after the kernel is up, so it
+ * cannot cover this gap.
+ */
+function createBootWindow() {
+  bootWin = new BrowserWindow({
+    width: 520,
+    height: 300,
+    resizable: false,
+    center: true,
+    title: 'freerag',
+    backgroundColor: '#1b1d21',
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  bootWin.loadFile(path.join(__dirname, 'renderer', 'boot.html'));
+  bootWin.on('closed', () => { bootWin = null; });
+  return bootWin;
+}
+
+/** Drives boot.html's own setBoot(); a no-op once the window is gone. */
+function updateBoot(text, pct) {
+  if (!bootWin || bootWin.isDestroyed()) return;
+  const call = `window.setBoot && window.setBoot(${JSON.stringify(text)}, ${Number(pct) || 0})`;
+  bootWin.webContents.executeJavaScript(call).catch(() => {});
+}
+
+function closeBootWindow() {
+  if (bootWin && !bootWin.isDestroyed()) bootWin.close();
+  bootWin = null;
+}
+
+/**
+ * Runs scripts/download-models.sh, streaming its output as log lines.
+ *
+ * The script is reused rather than reimplemented here so the endpoint
+ * (hf-mirror.com, which serves the gated GGUF without a token) and the resume
+ * behaviour stay in one place.
+ */
+function runModelDownloader(script, dir, python, onLine) {
+  return new Promise((resolve) => {
+    const child = spawn('bash', [script, 'deepdoc', 'laya', 'llm'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        FREERAG_MODELS_DIR: dir,
+        HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com',
+        FREERAG_PYTHON: python || 'python3',
+      },
+    });
+    let tail = '';
+    const feed = (data) => {
+      tail += String(data);
+      const parts = tail.split('\n');
+      tail = parts.pop();
+      for (const line of parts) onLine(line.replace(/\r+$/, ''));
+    };
+    child.stdout.on('data', feed);
+    child.stderr.on('data', feed);
+    child.on('error', (error) => onLine(`downloader error: ${error.message}`));
+    child.on('close', (code) => {
+      if (tail.trim()) onLine(tail.trim());
+      resolve(code);
+    });
+  });
+}
+
+/**
+ * Makes sure the model set is on disk, downloading it on the first launch.
+ *
+ * Returns false when it could not be fetched. The app still starts and the
+ * kernel degrades (no layout, no generation) rather than refusing to run.
+ */
+async function ensureModels(runtime, onLog, onProgress) {
+  const dir = runtime.models;
+  const script = runtime.downloadModels;
+  if (!fs.existsSync(script)) {
+    onLog(`model downloader missing at ${script}; models must be fetched by hand`);
+    return false;
+  }
+
+  fs.mkdirSync(dir, { recursive: true });
+  onLog(`fetching models into ${dir}`);
+
+  let total = 0;
+  let done = 0;
+  const code = await runModelDownloader(script, dir, runtime.python, (line) => {
+    const totalMatch = /^TOTAL (\d+)$/.exec(line.trim());
+    if (totalMatch) {
+      total = Number(totalMatch[1]);
+      return;
+    }
+    if (line.includes('[ ok ]') || line.includes('[skip]')) {
+      done += 1;
+      onProgress(`已完成 ${done}/${total || '?'} 个文件`, total ? Math.round((done / total) * 100) : 0);
+    } else {
+      const getMatch = /\[get \]\s+\S+\s+->\s+(.+)$/.exec(line);
+      if (getMatch) {
+        onProgress(`正在下载 ${getMatch[1].trim()}`, total ? Math.round((done / total) * 100) : 0);
+      }
+    }
+    onLog(line.trim());
+  });
+
+  const ok = modelsPresent(dir);
+  if (!ok) {
+    onLog(`model download did not complete (exit ${code}); layout and generation will be unavailable`);
+  }
+  return ok;
+}
+
 app.whenReady().then(async () => {
   const runtime = resolveRuntime();
 
@@ -963,6 +1104,20 @@ app.whenReady().then(async () => {
   // slower than the user expects: "cpu" here means every model will, too.
   emitLog(`hardware: ${hardware.accelerator?.backend || 'cpu'} · ` +
     `${hardware.cpu?.cores || '?'} cores · ${(hardware.memoryBytes / 1024 ** 3).toFixed(0)} GB`);
+
+  // The model set is fetched on the first launch, not bundled: at ~4.4 GB it
+  // cannot ship inside an installer published as a GitHub release asset (capped
+  // at 2 GB). Later launches find it in the user data dir and skip this. It runs
+  // before Qdrant and Ollama because the generator import needs the GGUF and the
+  // kernel's env points at the layout models.
+  if (modelsPresent(runtime.models)) {
+    emitLog(`models present at ${runtime.models}`);
+  } else {
+    createBootWindow();
+    updateBoot('准备下载模型…', 0);
+    await ensureModels(runtime, emitLog, updateBoot);
+    closeBootWindow();
+  }
 
   // Awaited on purpose: the kernel decides at startup whether dense retrieval
   // is remote or in-process, so it must not start until Qdrant answers.

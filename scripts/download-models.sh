@@ -14,8 +14,14 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS="$ROOT/models"
+# FREERAG_MODELS_DIR puts the set somewhere other than ./models. The installed
+# app uses it to keep models in its user data dir: resources/ is not writable,
+# and a bundled set would blow past GitHub's 2 GB release-asset cap.
+MODELS="${FREERAG_MODELS_DIR:-$ROOT/models}"
 ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+# Interpreter used only to write manifest.json. The app passes its bundled one,
+# so a machine without python3 on PATH still gets a manifest.
+PYTHON="${FREERAG_PYTHON:-python3}"
 
 # One or more groups, or `all` (default) to fetch everything. Callers pass
 # several groups at once, e.g. `download-models.sh deepdoc laya llm`.
@@ -90,15 +96,25 @@ download() {
 echo "models -> $MODELS   (endpoint: $ENDPOINT, groups: ${WANTED_GROUPS[*]})"
 echo
 
+# Resolved up front so a caller can show x-of-y progress: the TOTAL line is
+# emitted before any bytes move, and the app counts [ ok ]/[skip] against it.
+PLAN=()
 for entry in "${FILES[@]}"; do
   IFS='|' read -r repo file subdir name group <<<"$entry"
   group_wanted "$group" || continue
+  PLAN+=("$entry")
+done
+
+echo "TOTAL ${#PLAN[@]}"
+
+for entry in "${PLAN[@]}"; do
+  IFS='|' read -r repo file subdir name group <<<"$entry"
   download "$repo" "$file" "$subdir" "$name"
 done
 
 echo
 echo "writing manifest..."
-python3 - "$MODELS" "$ENDPOINT" <<'PY'
+"$PYTHON" - "$MODELS" "$ENDPOINT" <<'PY' 2>/dev/null || echo "  (manifest not written: $PYTHON unavailable)"
 import hashlib
 import json
 import os

@@ -3,16 +3,15 @@
 # Packages the desktop app (docs/plan.md §9 Phase 3 / Phase 6).
 #
 # What goes in: the Electron shell, the Go kernel, the parse sidecar's Python
-# sources, a vendored CPython with the sidecar's dependencies, the ONNX models
-# (layout / TSR / OCR) and Qdrant.
+# sources, a vendored CPython with the sidecar's dependencies, Qdrant and Ollama.
 #
 # What does NOT, on purpose:
 #
-#   * the generating LLM. Qwen3-4B is ~2.4 GB of weights and arrives through
-#     Ollama; the app reports it as missing (`status`) rather than growing the
-#     download by gigabytes. Same for Laya's ONNX weights — 1.6 GB on their own,
-#     which would more than triple the download for a component the app degrades
-#     without (the sufficiency checker falls back to term overlap).
+#   * the model set — deepdoc + Laya ONNX weights + the Qwen3 GGUF, ~4.4 GB. A
+#     GitHub release asset is capped at 2 GB, so an installer carrying them
+#     could not be published at all; the Qwen3 GGUF alone is ~2.4 GB, so
+#     splitting them across several assets does not rescue it either. The app
+#     fetches them on first launch with the bundled scripts/download-models.sh.
 #
 # Usage:
 #   scripts/build-installer.sh [--dir]
@@ -38,11 +37,11 @@ export PATH="$ROOT/.toolchain/go/bin:$PATH"
 ( cd "$ROOT" && go build -o bin/freerag ./cmd/freerag )
 ls -la "$ROOT/bin/freerag"
 
-say "2. download the model set"
-# Route A: the installer must be self-contained, so fetch everything the app
-# needs to answer out of the box — deepdoc + Laya ONNX weights and the Qwen3
-# GGUF. (laya-gguf is the non-loadable ggmlc artifact and is skipped.)
-bash "$ROOT/scripts/download-models.sh" deepdoc laya llm
+say "2. the model set is fetched by the app, not bundled here"
+# Deliberately neither downloaded nor packaged: the set is ~4.4 GB and a GitHub
+# release asset is capped at 2 GB, so an installer carrying it could not be
+# published at all. scripts/download-models.sh ships inside the app instead, and
+# desktop/main.js runs it into the user data dir on the first launch.
 echo
 
 say "3. vendor Qdrant"
@@ -89,7 +88,7 @@ ls -la "$VENDOR/python"    2>&1 || true
 ls -la "$VENDOR/ollama"    2>&1 || true
 df -h "$ROOT"              2>&1 || true
 
-say "6. check the sidecar and models are present"
+say "6. check the sidecar and runtimes are present"
 
 # Platform-specific vendored-runtime paths. Windows ships a CPython whose
 # interpreter is python.exe at the tree root (no bin/python3), and Ollama is not
@@ -103,10 +102,9 @@ esac
 CHECK=(
   "$ROOT/sidecar/parse_server.py"
   "$PY_BIN"
-  "$ROOT/models/deepdoc/layout.onnx"
-  "$ROOT/models/deepdoc/tsr.onnx"
-  "$ROOT/models/laya-onnx/laya.onnx"
-  "$ROOT/models/qwen3-4b/Qwen3-4B-Q4_K_M.gguf"
+  # The fetcher is part of the bundle: without it a fresh install can never get
+  # its models. The models themselves are checked at runtime, not here.
+  "$ROOT/scripts/download-models.sh"
 )
 if [[ -n "$OLLAMA_BIN" ]]; then
   CHECK+=("$OLLAMA_BIN")
@@ -124,7 +122,7 @@ for f in "${CHECK[@]}"; do
   fi
 done
 if [[ "$MISSING" == "1" ]]; then
-  echo "some resources are missing; run scripts/download-models.sh first" >&2
+  echo "some resources are missing; cannot package" >&2
   exit 1
 fi
 

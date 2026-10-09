@@ -53,27 +53,10 @@
         ]
       },
       {
-        "from": "../models/deepdoc",
-        "to": "models/deepdoc",
+        "from": "../scripts",
+        "to": "scripts",
         "filter": [
-          "**/*.onnx",
-          "**/*.res"
-        ]
-      },
-      {
-        "from": "../models/qwen3-4b",
-        "to": "models/qwen3-4b",
-        "filter": [
-          "**/*.gguf"
-        ]
-      },
-      {
-        "from": "../models/laya-onnx",
-        "to": "models/laya-onnx",
-        "filter": [
-          "**/*.onnx",
-          "**/*.onnx.data",
-          "**/*.json"
+          "**/*.sh"
         ]
       }
     ],
