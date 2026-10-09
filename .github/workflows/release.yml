@@ -48,12 +48,13 @@ jobs:
         with:
           node-version: '20'
 
-      # Build a real installer (not --dir): AppImage / dmg / nsis exe. The
-      # Actions runner reaches HuggingFace directly, so bypass the dev mirror.
+      # Build a real installer (not --dir): AppImage / dmg / nsis exe.
+      # Leave HF_ENDPOINT unset: download-models.sh defaults to hf-mirror.com,
+      # which is what serves the gated Qwen3-4B GGUF without a token. Setting it
+      # to huggingface.co makes that download 401 and aborts the build.
       - name: build installer
         shell: bash
         env:
-          HF_ENDPOINT: https://huggingface.co
           GOPROXY: https://goproxy.cn,https://proxy.golang.org,direct
         run: bash scripts/build-installer.sh
 

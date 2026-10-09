@@ -111,16 +111,18 @@ elif [[ "$OS" == "linux" ]]; then
     aarch64) LA="arm64" ;;
     *) echo "no Ollama linux build for $ARCH" >&2; exit 1 ;;
   esac
-  # ollama-linux-<la>.tgz holds the `ollama` binary at the archive root.
-  ASSET="ollama-linux-${LA}.tgz"
-  PART="$TARBALL.tgz"
+  # The CPU build is a zstd-compressed tarball with the `ollama` binary at its
+  # root (verified against the ollama/ollama release assets).
+  ASSET="ollama-linux-${LA}.tar.zst"
+  PART="$TARBALL.tar.zst"
   fetch_one() {
     local base="$1"
     curl -fSL --connect-timeout 20 --max-time 900 -o "$PART" "${base}ollama/ollama/releases/latest/download/$ASSET" 2>/dev/null
   }
   unpack() {
     local tmp; tmp="$(mktemp -d)"
-    tar xzf "$PART" -C "$tmp"
+    # --zstd needs the zstd binary (present on the CI runners and normal boxes).
+    tar --zstd -xf "$PART" -C "$tmp"
     local src; src="$(find "$tmp" -name ollama -type f | head -1)"
     if [[ -z "$src" ]]; then echo "ollama binary not found in $ASSET" >&2; return 1; fi
     mkdir -p "$DEST"
