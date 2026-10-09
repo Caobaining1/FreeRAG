@@ -32,8 +32,10 @@ jobs:
             artifact: dist/*.dmg
           # Windows packaging is not yet self-contained: there is no Qdrant
           # Windows asset and Ollama cannot be vendored from its installer EXE
-          # (scripts/vendor-ollama.sh documents the gap). Kept here as an
-          # informative, non-blocking build until those gaps close.
+          # (scripts/vendor-ollama.sh documents the gap), so the built app needs
+          # Qdrant + Ollama on PATH to actually run. We still ship a portable 7z
+          # (electron-builder `portable` target, a self-extractor with no NSIS
+          # step) as an informative, non-blocking artifact until those gaps close.
           - os: windows-latest
             artifact: dist/*.exe
             continue-on-error: true
