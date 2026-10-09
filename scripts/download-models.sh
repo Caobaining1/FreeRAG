@@ -16,10 +16,27 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODELS="$ROOT/models"
 ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-TARGET="${1:-all}"
+
+# One or more groups, or `all` (default) to fetch everything. Callers pass
+# several groups at once, e.g. `download-models.sh deepdoc laya llm`.
+if [ "$#" -eq 0 ]; then
+  GROUPS=(all)
+else
+  GROUPS=("$@")
+fi
 
 mkdir -p "$MODELS"
 FAIL=0
+
+group_wanted() {
+  local g="$1"
+  local wanted
+  for wanted in "${GROUPS[@]}"; do
+    [ "$wanted" = "all" ] && return 0
+    [ "$wanted" = "$g" ] && return 0
+  done
+  return 1
+}
 
 # repo|remote file|local subdir|local name|group
 #
@@ -70,14 +87,12 @@ download() {
   echo "  [ ok ] $subdir/$name ($(human "$dest"))"
 }
 
-echo "models -> $MODELS   (endpoint: $ENDPOINT, target: $TARGET)"
+echo "models -> $MODELS   (endpoint: $ENDPOINT, groups: ${GROUPS[*]})"
 echo
 
 for entry in "${FILES[@]}"; do
   IFS='|' read -r repo file subdir name group <<<"$entry"
-  if [ "$TARGET" != "all" ] && [ "$TARGET" != "$group" ]; then
-    continue
-  fi
+  group_wanted "$group" || continue
   download "$repo" "$file" "$subdir" "$name"
 done
 

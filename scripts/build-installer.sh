@@ -42,7 +42,7 @@ say "2. download the model set"
 # Route A: the installer must be self-contained, so fetch everything the app
 # needs to answer out of the box — deepdoc + Laya ONNX weights and the Qwen3
 # GGUF. (laya-gguf is the non-loadable ggmlc artifact and is skipped.)
-"$ROOT/scripts/download-models.sh" deepdoc laya llm
+bash "$ROOT/scripts/download-models.sh" deepdoc laya llm
 echo
 
 say "3. vendor Qdrant"
@@ -75,13 +75,13 @@ say "4. vendor the Python runtime"
 # cannot parse a new one, because the sidecar's dependencies are not on a clean
 # machine. Kept as a separate script: it downloads ~27 MB and builds a ~258 MB
 # tree, so it should be runnable on its own while iterating on the sidecar.
-"$ROOT/scripts/fetch-python-runtime.sh"
+bash "$ROOT/scripts/fetch-python-runtime.sh"
 
 say "5. vendor Ollama"
 # Route A: the inference runtime ships with the app. desktop/main.js spawns it
 # on first launch and imports freerag-qwen3 from the bundled GGUF, so there is
 # no separate Ollama install for the user to perform.
-"$ROOT/scripts/vendor-ollama.sh"
+bash "$ROOT/scripts/vendor-ollama.sh"
 
 say "6. check the sidecar and models are present"
 MISSING=0
