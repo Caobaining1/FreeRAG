@@ -90,16 +90,32 @@ ls -la "$VENDOR/ollama"    2>&1 || true
 df -h "$ROOT"              2>&1 || true
 
 say "6. check the sidecar and models are present"
-MISSING=0
-for f in \
-  "$ROOT/sidecar/parse_server.py" \
-  "$VENDOR/python/bin/python3" \
-  "$VENDOR/ollama/ollama" \
-  "$ROOT/models/deepdoc/layout.onnx" \
-  "$ROOT/models/deepdoc/tsr.onnx" \
-  "$ROOT/models/laya-onnx/laya.onnx" \
+
+# Platform-specific vendored-runtime paths. Windows ships a CPython whose
+# interpreter is python.exe at the tree root (no bin/python3), and Ollama is not
+# extracted from the installer EXE — the app falls back to an Ollama on PATH — so
+# neither is required to exist on Windows the way they are on macOS/Linux.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) PY_BIN="$VENDOR/python/python.exe"; OLLAMA_BIN="" ;;
+  *)                    PY_BIN="$VENDOR/python/bin/python3"; OLLAMA_BIN="$VENDOR/ollama/ollama" ;;
+esac
+
+CHECK=(
+  "$ROOT/sidecar/parse_server.py"
+  "$PY_BIN"
+  "$ROOT/models/deepdoc/layout.onnx"
+  "$ROOT/models/deepdoc/tsr.onnx"
+  "$ROOT/models/laya-onnx/laya.onnx"
   "$ROOT/models/qwen3-4b/Qwen3-4B-Q4_K_M.gguf"
-do
+)
+if [[ -n "$OLLAMA_BIN" ]]; then
+  CHECK+=("$OLLAMA_BIN")
+else
+  echo "  (Windows: Ollama is expected on PATH, not vendored — skipping that check)"
+fi
+
+MISSING=0
+for f in "${CHECK[@]}"; do
   if [[ -e "$f" ]]; then
     printf '  ok       %s\n' "${f#"$ROOT/"}"
   else
