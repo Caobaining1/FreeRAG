@@ -72,6 +72,15 @@ function resolveRuntime() {
     python: installed
       ? bundledPython(path.join(resources, 'python'))
       : path.join(dev, '.venv314', 'bin', 'python'),
+    // Installed, the binary vendored by vendor-ollama.sh (scripts/build-installer.sh
+    // step 5). In a checkout it is the same vendored copy when present, otherwise
+    // an `ollama` discovered on PATH — so a developer who installed Ollama
+    // system-wide needs nothing extra.
+    ollama: installed
+      ? path.join(resources, 'ollama', ollamaBin())
+      : (fs.existsSync(path.join(dev, '.toolchain', 'ollama', ollamaBin()))
+          ? path.join(dev, '.toolchain', 'ollama', ollamaBin())
+          : ollamaBin()),
   };
 }
 
@@ -234,7 +243,7 @@ function kernelSettingsPayload(settings) {
   };
 }
 
-function kernelEnv(runtime, qdrantReady, hardware) {
+function kernelEnv(runtime, qdrantReady, ollamaReady, hardware) {
   const userData = app.getPath('userData');
   const env = {
     ...process.env,
@@ -284,6 +293,11 @@ function kernelEnv(runtime, qdrantReady, hardware) {
   // failure on every launch, and a warning that always fires is one nobody
   // reads.
   if (qdrantReady) env.FREERAG_QDRANT_URL = QDRANT_URL;
+  // Told explicitly, never left to the kernel's default: the kernel and the
+  // parse sidecar both fall back to this same port, but stating it means a
+  // misconfigured Ollama shows up as "generator unreachable" rather than as a
+  // silent fallback to extractive drafts.
+  if (ollamaReady) env.FREERAG_OLLAMA_URL = OLLAMA_URL;
   // Told explicitly, never left to PATH discovery. "python3" on a machine that
   // never ran this project is the system interpreter, which has none of the
   // sidecar's dependencies — and that failure shows up as a parse error on the
@@ -301,6 +315,23 @@ const QDRANT_URL = 'http://127.0.0.1:6333';
 // Generous on purpose: a cold start unpacks its storage, and giving up early
 // costs the whole session's ANN path for the sake of a couple of seconds.
 const QDRANT_READY_TIMEOUT_MS = 20000;
+
+// Ollama serves the GGUF generator (and, optionally, the vision model) over
+// this port. The kernel and the parse sidecar both default to it, so spawning
+// Ollama here with no host override is enough to wire the whole pipeline.
+const OLLAMA_URL = 'http://127.0.0.1:11434';
+const OLLAMA_READY_TIMEOUT_MS = 20000;
+// The model the kernel asks Ollama to load (cmd/freerag/main.go:
+// newGenerator -> DefaultGeneratorModel). Imported once from the bundled GGUF.
+const GENERATOR_MODEL = 'freerag-qwen3';
+// An import copies the GGUF into Ollama's blob store; bound it so a wedged copy
+// cannot hang first launch forever.
+const OLLAMA_IMPORT_TIMEOUT_MS = 600000;
+
+/** The Ollama binary name for this platform (Windows ships ollama.exe). */
+function ollamaBin() {
+  return process.platform === 'win32' ? 'ollama.exe' : 'ollama';
+}
 
 /** Resolves true once something answers on the Qdrant URL. */
 async function qdrantAnswers(url, timeoutMs) {
@@ -361,6 +392,100 @@ async function startQdrant(runtime, onLog) {
     return { child, ready: true };
   }
   onLog('qdrant did not become ready; dense retrieval will run in-process');
+  return { child, ready: false };
+}
+
+/** Resolves true once something answers on the Ollama URL. */
+async function ollamaAnswers(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(1500) });
+      if (response.ok) return true;
+    } catch {
+      // Not listening yet, which is the expected answer for the first seconds.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+/**
+ * Ensures the generating model is known to the running Ollama.
+ *
+ * Idempotent: a model already imported is left alone, so repeated launches do
+ * not re-copy the GGUF. The import points Ollama at the bundled GGUF under
+ * resources/models, which it copies into its own blob store; the kernel then
+ * loads `freerag-qwen3` by that name (cmd/freerag/main.go: newGenerator).
+ */
+function importGenerator(binary, ggufPath, onLog) {
+  if (!fs.existsSync(ggufPath)) {
+    onLog(`generator GGUF not found: ${ggufPath}; ask will fail until it is present`);
+    return false;
+  }
+  const list = spawnSync(binary, ['list'], { encoding: 'utf8' });
+  if (list.status === 0 && (list.stdout || '').includes(GENERATOR_MODEL)) {
+    onLog(`generator ${GENERATOR_MODEL} already imported`);
+    return true;
+  }
+  onLog(`importing ${GENERATOR_MODEL} from ${ggufPath} ...`);
+  const modelfile = path.join(os.tmpdir(), `freerag-${GENERATOR_MODEL}.Modelfile`);
+  fs.writeFileSync(modelfile, `FROM ${ggufPath}\n`);
+  const result = spawnSync(binary, ['create', GENERATOR_MODEL, '-f', modelfile], {
+    encoding: 'utf8',
+    timeout: OLLAMA_IMPORT_TIMEOUT_MS,
+  });
+  fs.rmSync(modelfile, { force: true });
+  if (result.status !== 0) {
+    onLog(`generator import failed: ${String(result.stderr || result.error || '').trim()}`);
+    return false;
+  }
+  onLog(`generator ${GENERATOR_MODEL} imported`);
+  return true;
+}
+
+/**
+ * Starts the bundled Ollama (or adopts one already running) so the kernel has a
+ * generator to talk to — Route A, no manual install for the user.
+ *
+ * Optional by design: without it the kernel reports `generator.reachable=false`
+ * and degrades to extractive drafts. It is managed here (not by the kernel) for
+ * the same reason as Qdrant: the kernel is deliberately unaware of processes.
+ */
+async function startOllama(runtime, onLog) {
+  // A bare command name means "on PATH"; only a real missing file at an
+  // explicit path is a hard failure (e.g. the Windows bundle, where Ollama
+  // cannot be vendored from its installer EXE).
+  if (!fs.existsSync(runtime.ollama) && runtime.ollama !== ollamaBin()) {
+    onLog(`ollama not bundled (${runtime.ollama}); install it or put it on PATH for generation`);
+    return { child: null, ready: false };
+  }
+
+  if (await ollamaAnswers(OLLAMA_URL, 1200)) {
+    onLog(`ollama already running at ${OLLAMA_URL}`);
+    importGenerator(runtime.ollama, path.join(runtime.models, 'qwen3-4b', 'Qwen3-4B-Q4_K_M.gguf'), onLog);
+    return { child: null, ready: true };
+  }
+
+  const storage = path.join(app.getPath('userData'), 'ollama');
+  // Not optional: the child uses this as its model store, and a missing dir
+  // makes `ollama serve` fail to start on a first run.
+  fs.mkdirSync(storage, { recursive: true });
+
+  const child = spawn(runtime.ollama, ['serve'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: storage,
+    env: { ...process.env, OLLAMA_MODELS: storage },
+  });
+  child.stderr.on('data', (data) => onLog(`ollama: ${String(data).trim()}`));
+  child.on('error', (error) => onLog(`ollama failed to start: ${error.message}`));
+
+  if (await ollamaAnswers(OLLAMA_URL, OLLAMA_READY_TIMEOUT_MS)) {
+    onLog(`ollama ready at ${OLLAMA_URL}`);
+    importGenerator(runtime.ollama, path.join(runtime.models, 'qwen3-4b', 'Qwen3-4B-Q4_K_M.gguf'), onLog);
+    return { child, ready: true };
+  }
+  onLog('ollama did not become ready; generation will be unavailable');
   return { child, ready: false };
 }
 
@@ -540,6 +665,7 @@ class KernelClient {
 let win = null;
 let kernel = null;
 let qdrant = null;
+let ollama = null;
 
 function broadcast(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -843,9 +969,15 @@ app.whenReady().then(async () => {
   const service = await startQdrant(runtime, emitLog);
   qdrant = service.child;
 
+  // Awaited so the generator is reachable before the first `ask`: Route A
+  // spawns the bundled Ollama and imports freerag-qwen3 from the bundled GGUF,
+  // so the user opens the app to a working generator, not a setup prompt.
+  const ollamaSvc = await startOllama(runtime, emitLog);
+  ollama = ollamaSvc.child;
+
   kernel = new KernelClient({
     binPath: kernelBinary(runtime),
-    env: kernelEnv(runtime, service.ready, hardware),
+    env: kernelEnv(runtime, service.ready, ollamaSvc.ready, hardware),
     onLog: emitLog,
     onExit: () => broadcast('kernel-status', { running: false }),
     onEvent: (msg) => broadcast('kernel-event', msg),
@@ -977,4 +1109,7 @@ app.on('before-quit', () => {
   // Left running, Qdrant would keep holding its port and the storage lock, so
   // the next launch finds a database it cannot open.
   if (qdrant && !qdrant.killed) qdrant.kill();
+  // Same for Ollama: it would keep its port and blob-store lock, and the next
+  // launch would find a server it cannot adopt cleanly.
+  if (ollama && !ollama.killed) ollama.kill();
 });

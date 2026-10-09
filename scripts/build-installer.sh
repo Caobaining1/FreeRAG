@@ -38,7 +38,14 @@ export PATH="$ROOT/.toolchain/go/bin:$PATH"
 ( cd "$ROOT" && go build -o bin/freerag ./cmd/freerag )
 ls -la "$ROOT/bin/freerag"
 
-say "2. vendor Qdrant"
+say "2. download the model set"
+# Route A: the installer must be self-contained, so fetch everything the app
+# needs to answer out of the box — deepdoc + Laya ONNX weights and the Qwen3
+# GGUF. (laya-gguf is the non-loadable ggmlc artifact and is skipped.)
+"$ROOT/scripts/download-models.sh" deepdoc laya llm
+echo
+
+say "3. vendor Qdrant"
 # The kernel falls back to an in-process scan without it, so a missing Qdrant
 # degrades rather than breaks. Vendoring is still worth it: the ANN path is the
 # difference between a 1.7 ms query and a 60 ms one at 20k chunks.
@@ -63,21 +70,29 @@ else
   fi
 fi
 
-say "3. vendor the Python runtime"
+say "4. vendor the Python runtime"
 # Without this the app answers questions about already-indexed documents but
 # cannot parse a new one, because the sidecar's dependencies are not on a clean
 # machine. Kept as a separate script: it downloads ~27 MB and builds a ~258 MB
 # tree, so it should be runnable on its own while iterating on the sidecar.
 "$ROOT/scripts/fetch-python-runtime.sh"
 
-say "4. check the sidecar and models are present"
+say "5. vendor Ollama"
+# Route A: the inference runtime ships with the app. desktop/main.js spawns it
+# on first launch and imports freerag-qwen3 from the bundled GGUF, so there is
+# no separate Ollama install for the user to perform.
+"$ROOT/scripts/vendor-ollama.sh"
+
+say "6. check the sidecar and models are present"
 MISSING=0
 for f in \
   "$ROOT/sidecar/parse_server.py" \
   "$VENDOR/python/bin/python3" \
+  "$VENDOR/ollama/ollama" \
   "$ROOT/models/deepdoc/layout.onnx" \
   "$ROOT/models/deepdoc/tsr.onnx" \
-  "$ROOT/models/laya-onnx/laya.onnx"
+  "$ROOT/models/laya-onnx/laya.onnx" \
+  "$ROOT/models/qwen3-4b/Qwen3-4B-Q4_K_M.gguf"
 do
   if [[ -e "$f" ]]; then
     printf '  ok       %s\n' "${f#"$ROOT/"}"
@@ -91,7 +106,7 @@ if [[ "$MISSING" == "1" ]]; then
   exit 1
 fi
 
-say "5. electron-builder ($TARGET)"
+say "7. electron-builder ($TARGET)"
 # electron-builder fetches its own Electron distribution and helper binaries
 # from GitHub. On a network where that stalls, the build hangs for ten minutes
 # and dies with a bare "Timeout awaiting 'request'" — which says nothing about
@@ -119,12 +134,13 @@ The build is under dist/. Three things to know before handing it to anyone:
      The app points FREERAG_PYTHON at it rather than discovering `python3` on
      PATH, which on a clean machine is an interpreter without those packages.
 
-  2. NO LLM WEIGHTS, AND NO LAYA. Ollama plus a `freerag-qwen3` model are
-     required, and Laya's ONNX weights are not bundled either — `laya.onnx.data`
-     alone is 1.6 GB, which would more than triple the download for a component
-     the app degrades without (the sufficiency checker falls back to term
-     overlap). Fetch both with scripts/download-models.sh.
-     `status` reports `generator.reachable`, and the UI shows each as a chip.
+  2. LLM AND LAYA WEIGHTS ARE BUNDLED (Route A). The Qwen3-4B GGUF and Laya's
+     ONNX weights live under resources/models, and the Ollama binary under
+     resources/ollama. On first launch desktop/main.js starts Ollama against a
+     writable model store in userData and imports `freerag-qwen3` from the
+     bundled GGUF (idempotent: skipped once present). No separate Ollama install
+     or model pull is required of the user. `status` reports
+     `generator.reachable`, and the UI shows each component as a chip.
 
   3. On macOS the app is unsigned, so Gatekeeper will refuse the first launch.
      Right-click -> Open, or `xattr -dr com.apple.quarantine /Applications/freerag.app`.
