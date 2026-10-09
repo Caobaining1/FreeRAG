@@ -20,9 +20,9 @@ ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 # One or more groups, or `all` (default) to fetch everything. Callers pass
 # several groups at once, e.g. `download-models.sh deepdoc laya llm`.
 if [ "$#" -eq 0 ]; then
-  GROUPS=(all)
+  WANTED_GROUPS=(all)
 else
-  GROUPS=("$@")
+  WANTED_GROUPS=("$@")
 fi
 
 mkdir -p "$MODELS"
@@ -31,7 +31,7 @@ FAIL=0
 group_wanted() {
   local g="$1"
   local wanted
-  for wanted in "${GROUPS[@]}"; do
+  for wanted in "${WANTED_GROUPS[@]}"; do
     [ "$wanted" = "all" ] && return 0
     [ "$wanted" = "$g" ] && return 0
   done
@@ -87,7 +87,7 @@ download() {
   echo "  [ ok ] $subdir/$name ($(human "$dest"))"
 }
 
-echo "models -> $MODELS   (endpoint: $ENDPOINT, groups: ${GROUPS[*]})"
+echo "models -> $MODELS   (endpoint: $ENDPOINT, groups: ${WANTED_GROUPS[*]})"
 echo
 
 for entry in "${FILES[@]}"; do
