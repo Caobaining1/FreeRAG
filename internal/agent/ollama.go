@@ -177,9 +177,10 @@ func (m *OllamaModel) client() *http.Client {
 }
 
 type ollamaMessage struct {
-	Role      string           `json:"role"`
-	Content   string           `json:"content"`
-	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+	Role       string           `json:"role"`
+	Content    string           `json:"content"`
+	ToolCalls  []ollamaToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 	// Images are base64 PNG/JPEG payloads, which is what Ollama's chat API
 	// accepts inline. Only the figure captioner sends them.
 	Images []string `json:"images,omitempty"`
@@ -321,7 +322,14 @@ func (m *OllamaModel) complete(
 
 	wire := make([]ollamaMessage, 0, len(messages))
 	for _, msg := range messages {
-		wire = append(wire, ollamaMessage{Role: string(msg.Role), Content: msg.Content})
+		om := ollamaMessage{Role: string(msg.Role), Content: msg.Content}
+		if len(msg.ToolCalls) > 0 {
+			om.ToolCalls = convertToOllamaToolCalls(msg.ToolCalls)
+		}
+		if msg.Role == RoleTool && msg.ToolCallID != "" {
+			om.ToolCallID = msg.ToolCallID
+		}
+		wire = append(wire, om)
 	}
 
 	options := map[string]any{}
@@ -454,6 +462,26 @@ func decodeToolCalls(raw []ollamaToolCall) []ToolCall {
 			ID:        call.ID,
 			Name:      name,
 			Arguments: decodeArguments(call.Function.Arguments),
+		})
+	}
+	return out
+}
+
+// convertToOllamaToolCalls renders assistant tool invocations for the
+// OpenAI-compatible wire form Ollama's /api/chat accepts.
+func convertToOllamaToolCalls(calls []ToolCall) []ollamaToolCall {
+	out := make([]ollamaToolCall, 0, len(calls))
+	for _, c := range calls {
+		raw, err := json.Marshal(c.Arguments)
+		if err != nil {
+			raw = []byte("{}")
+		}
+		out = append(out, ollamaToolCall{
+			ID: c.ID,
+			Function: struct {
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments,omitempty"`
+			}{Name: c.Name, Arguments: raw},
 		})
 	}
 	return out

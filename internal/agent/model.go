@@ -18,12 +18,19 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
 )
 
 // Message is one turn handed to the model.
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role       Role       `json:"role"`
+	Content    string     `json:"content"`
+	// ToolCalls carries assistant tool invocations in a multi-turn tool-calling
+	// conversation (used by the migrated agentic_rag ReAct loop).
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID ties a tool-result message back to the assistant tool call that
+	// produced it.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // ToolCall is a model request to run a tool.
