@@ -328,18 +328,10 @@ func Run(ctx context.Context, in Input) (string, error) {
 		in.ToolCallDurations = NewDurationAccumulator()
 	}
 
+	// The ReAct loop is tool-agnostic: FreeRAG supplies its own tools through
+	// Input.Tools. (The upstream RAGFlow corpus tools and web_search are not
+	// bundled in this migration.)
 	tools := in.Tools
-	if len(tools) == 0 {
-		// No explicit tool set: build it from the requested template, which
-		// lets operators change the tool list without recompiling. The config
-		// is reloaded from disk when its mtime changes, so a quick edit +
-		// re-run is enough to try a different tool subset or prompt variant.
-		tools = toolsFor(tmpl, in.TenantID, in.DatasetIDs)
-		// Web search is injected, never declared: the template's tool list
-		// describes the corpus toolset, and a conversation whose context
-		// carries a provider gets one extra tool at run time.
-		tools = append(tools, webSearchTools(ctx)...)
-	}
 
 	maxIter := in.MaxIterations
 	if maxIter <= 0 {

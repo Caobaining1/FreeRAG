@@ -52,7 +52,7 @@ func servedChunkFields(ctx context.Context, tool, query string, hit snippetHit) 
 	}
 	lower := strings.ToLower(hit.snippet)
 	matched := 0
-	for _, term := range bm25TermTokens([]string{query}) {
+	for _, term := range strings.Fields(query) {
 		if term != "" && strings.Contains(lower, strings.ToLower(term)) {
 			matched++
 		}

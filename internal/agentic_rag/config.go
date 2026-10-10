@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino/components/tool"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
@@ -56,44 +55,6 @@ type Template struct {
 // case-insensitively rather than via snake_case keys.
 type configFile struct {
 	Templates []Template `json:"templates" yaml:"templates"`
-}
-
-// toolFactory builds a tool.BaseTool scoped to the given tenant/datasets. The
-// retrieval tools need tenantID/datasetIDs; the reasoning/sandbox tools ignore
-// them.
-type toolFactory func(tenantID string, datasetIDs []string) tool.BaseTool
-
-// toolRegistry maps every supported tool name to its constructor. Keeping this
-// here means adding a new tool is a one-line registration, and the config drives
-// which subset is actually loaded. web_search is NOT in this map and must not
-// appear in a template's tools list: it is injected by Run when the conversation
-// has a search provider.
-func toolRegistry() map[string]toolFactory {
-	return map[string]toolFactory{
-		"think":              func(_ string, _ []string) tool.BaseTool { return NewThinkTool() },
-		"todo_write":         func(_ string, _ []string) tool.BaseTool { return NewTodoWriteTool() },
-		"run_javascript":     func(_ string, _ []string) tool.BaseTool { return NewRunJavascriptTool() },
-		"grep_chunks":        func(t string, d []string) tool.BaseTool { return NewGrepChunksTool(t, d) },
-		"search_chunks":      func(t string, d []string) tool.BaseTool { return NewSearchChunksTool(t, d) },
-		"search_bm25_chunks": func(t string, d []string) tool.BaseTool { return NewSearchBm25ChunksTool(t, d) },
-		// The pure-vector leg: same payload as search_chunks, no keyword leg at
-		// all (see tool_search_semantic_chunks.go).
-		"search_semantic_chunks": func(t string, d []string) tool.BaseTool { return NewSearchSemanticChunksTool(t, d) },
-		"list_chunks":            func(t string, d []string) tool.BaseTool { return NewListChunksTool(t, d) },
-		"search_metadata":        func(t string, d []string) tool.BaseTool { return NewMetadataSearchTool(t, d) },
-		// The compiled-knowledge-graph walk. Registered always; a template that
-		// omits it simply never offers it to the model.
-		"graph_explore": func(t string, d []string) tool.BaseTool { return NewGraphExploreTool(t, d) },
-		// The compiled-navigation-tree router. Registered always; a template that
-		// omits it simply never offers it to the model (same pattern as
-		// graph_explore).
-		"navigate_tree": func(t string, d []string) tool.BaseTool { return NewNavigateTreeTool(t, d) },
-		// The compiled-structure drilldown: given a doc_id (from navigate_tree),
-		// reads that document's compiled entity/relation outline and returns a
-		// query-focused TOC the model feeds to list_chunks. Registered always; a
-		// template that omits it never offers it to the model.
-		"navigate_structure": func(t string, d []string) tool.BaseTool { return NewNavigateStructureTool(t, d) },
-	}
 }
 
 // defaultConfigPath is the on-disk location of the agent config. It can be
@@ -215,27 +176,8 @@ func instructionFor(t Template) string {
 	return Prompt()
 }
 
-// toolsFor builds the agent tool set from the template's tool list, falling back
-// to the full default set when the template lists none. Unknown names are
-// skipped with a warning so a typo doesn't silently drop a tool.
-func toolsFor(t Template, tenantID string, datasetIDs []string) []tool.BaseTool {
-	reg := toolRegistry()
-	names := t.Tools
-	if len(names) == 0 {
-		names = make([]string, 0, len(reg))
-		for n := range reg {
-			names = append(names, n)
-		}
-	}
-	out := make([]tool.BaseTool, 0, len(names))
-	for _, name := range names {
-		f, ok := reg[name]
-		if !ok {
-			common.Warn("agentic_rag: unknown tool name in config, skipping",
-				zap.String("tool", name))
-			continue
-		}
-		out = append(out, f(tenantID, datasetIDs))
-	}
-	return out
-}
+// toolsFor builds the agent tool set from the template's tool list. In this
+// FreeRAG migration the loop is tool-agnostic (FreeRAG supplies its own tools
+// via Input.Tools), so this helper is intentionally removed; callers must pass
+// tools explicitly.
+
